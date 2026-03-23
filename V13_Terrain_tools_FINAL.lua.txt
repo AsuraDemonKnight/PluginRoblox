@@ -1,0 +1,1892 @@
+-- Creator: BY SYGKMUNII
+-- Versi: V13 DELTA EDITION — FULL STUDIO FEATURES
+-- Status: Support Delta Executor / Executor lainnya
+-- Dilarang jual/beli dengan alasan remake
+-- ═══════════════════════════════════════════════════════════
+-- TAMBAHAN V13 (dari V12):
+-- BATCH A - FITUR INTI:
+--  [A1] SEA LEVEL   — isi air sekaligus di bawah Y target
+--  [A2] REPLACE MAT — ganti semua material X → Y di terrain
+--  [A3] HUD INFO    — overlay mode+ukuran di pojok layar
+--  [A4] SPEED BRUSH — slider cooldown brush (1=cepat, 10=lambat)
+--  [A5] TAB UI      — panel dibagi 4 tab: ADD/REMOVE/PAINT/TOOL
+-- BATCH B - POLISH:
+--  [B1] AUTO-SAVE DRAFT — tiap 5 menit simpan _autosave.txt
+--  [B2] FILE LIST PANEL — lihat file Terrain*.txt hasil konversi
+--  [B3] SCROLL WHEEL    — scroll = resize brush
+--  [B4] PANEL MINIMIZE  — klik title = minimize/expand panel
+--  [B5] KATEGORI MAT    — material dikelompokkan Alam/Buatan/Air
+-- KONVERSI SYNC:
+--  Sea Level & Replace Mat masuk generateScriptChunks()
+--  sehingga hasil file .txt bisa reproduce terrain 100% akurat
+-- ═══════════════════════════════════════════════════════════
+
+local Players      = game:GetService("Players")
+local Workspace    = game:GetService("Workspace")
+local RunService   = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UIS          = game:GetService("UserInputService")
+local player       = Players.LocalPlayer
+local mouse        = player:GetMouse()
+
+local PlayerGui = player:WaitForChild("PlayerGui", 15)
+local oldGui    = PlayerGui:FindFirstChild("TerrainBuilderDelta")
+if oldGui then oldGui:Destroy() end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name            = "TerrainBuilderDelta"
+screenGui.ResetOnSpawn    = false
+screenGui.IgnoreGuiInset  = true
+screenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+screenGui.DisplayOrder    = 999
+screenGui.Parent          = PlayerGui
+
+local pluginFrame = Instance.new("Frame")
+pluginFrame.Name   = "MainFrame"
+pluginFrame.Parent = screenGui
+
+-- ═══ SHARED STATE TABLE ═══
+local _TB = {}
+
+-- clipboard compat
+if not setclipboard then
+	if rbxsetclipboard then setclipboard = rbxsetclipboard
+	elseif syn and syn.clipboard and syn.clipboard.set then setclipboard = syn.clipboard.set
+	else setclipboard = function(t) warn("[TB] clipboard N/A") end end
+end
+
+local function safeWriteFile(path, content)
+	local ok, err = pcall(function() writefile(path, content) end)
+	return ok, err
+end
+local function safeReadFile(path)
+	local ok, content = pcall(function() return readfile(path) end)
+	return ok and content or nil
+end
+local function safeMakeFolder(path)
+	pcall(function() if not isfolder(path) then makefolder(path) end end)
+end
+local function safeListFiles(path)
+	local ok, files = pcall(function() return listfiles(path) end)
+	return ok and files or {}
+end
+
+repeat task.wait() until player and player:IsDescendantOf(game)
+if not player.Character then player.CharacterAdded:Wait() end
+task.wait(0.5)
+
+-- ═══════════════════════════════════════════════════════════
+-- KONSTANTA
+-- ═══════════════════════════════════════════════════════════
+local PANEL_W        = 290
+local PANEL_H        = 290
+local TERRAIN_LIMIT  = 660
+local SCRIPT_CHAR_LIMIT = 200000
+local DELTA_WORKSPACE   = "Delta/Workspace"
+local HASIL_FOLDER      = DELTA_WORKSPACE .. "/HASIL TERRAIN"
+local AUTOSAVE_PATH     = HASIL_FOLDER .. "/_autosave.txt"
+local AUTOSAVE_INTERVAL = 300  -- 5 menit
+
+-- ═══════════════════════════════════════════════════════════
+-- STATE
+-- ═══════════════════════════════════════════════════════════
+_TB.width=6; _TB.height=6; _TB.depth=6
+_TB.currentBlockSize = Vector3.new(6, 6, 6)
+_TB.rotationAngle    = 0
+_TB.brushStrength    = 5
+_TB.brushOpacity     = 0.65
+_TB.brushCooldown    = 0.05  -- [A4] adjustable
+_TB.brushSpeed       = 5     -- 1=cepat(0.01s) 10=lambat(0.15s)
+
+_TB.placementEnabled     = false
+_TB.autoConvertToTerrain = false
+_TB.tunnelMode           = false
+_TB.brushTerrainOnly     = false
+_TB.treeBrushReady       = false
+_TB.treeBrushActive      = false
+_TB.swipeMode            = false
+_TB.swipeModeActive      = false
+_TB.isMouseDown          = false
+_TB.panelVisible         = true
+_TB.panelMinimized       = false  -- [B4]
+_TB.limitReached         = false
+_TB.lockY                = false
+_TB.lockedY              = 0
+
+-- [A1] Sea Level
+_TB.seaLevelY    = 0
+_TB.seaLevelMode = false
+-- [A2] Replace Material
+_TB.replaceSrcMat = "Grass"
+_TB.replaceDstMat = "Sand"
+-- [A5] Tab aktif
+_TB.activeTab = "ADD"  -- ADD / REMOVE / PAINT / TOOL
+
+-- Special modes
+_TB.flattenMode  = false
+_TB.smoothMode   = false
+_TB.erodeMode    = false
+_TB.growMode     = false
+_TB.paintMode    = false
+_TB.flattenTargetY = 0
+
+-- timing
+_TB.lastBrushTime        = 0
+_TB.lastTreeBrushTime    = 0
+_TB.treeBrushCooldown    = 0.5
+_TB.lastSwipeBrushTime   = 0
+_TB.swipeBrushCooldown   = 0.05
+_TB.lastSwipePos         = nil
+_TB.lastSpecialBrushTime = 0
+_TB.specialBrushCooldown = 0.08
+_TB.lastAutoSave         = 0
+
+-- undo/redo
+_TB.brushUndoStack = {}
+_TB.brushRedoStack = {}
+
+-- clear confirm
+_TB.clearConfirmPending = false
+_TB.clearConfirmTimer   = nil
+
+-- ═══════════════════════════════════════════════════════════
+-- DATA MATERIAL
+-- ═══════════════════════════════════════════════════════════
+local materials = {
+	"Grass","Ground","Mud","Sand","Snow","LeafyGrass",
+	"Rock","Slate","Basalt","Cobblestone","Granite","Limestone",
+	"Pavement","Salt","CrackedLava","Marble",
+	"Water","Ice","Glacier",
+	"Brick","Concrete","Plastic","Wood","WoodPlanks","Metal","DiamondPlate"
+}
+
+-- [B5] Kategori material
+local materialCategory = {
+	Grass="Alam",LeafyGrass="Alam",Ground="Alam",Mud="Alam",Sand="Alam",
+	Snow="Alam",Rock="Alam",Slate="Alam",Basalt="Alam",Cobblestone="Alam",
+	Granite="Alam",Limestone="Alam",Pavement="Alam",Salt="Alam",
+	CrackedLava="Alam",Marble="Alam",
+	Water="Air",Ice="Air",Glacier="Air",
+	Brick="Buatan",Concrete="Buatan",Plastic="Buatan",
+	Wood="Buatan",WoodPlanks="Buatan",Metal="Buatan",DiamondPlate="Buatan",
+}
+
+local materialNames = {
+	Grass="Rumput",Ground="Tanah",Mud="Lumpur",Sand="Pasir",Snow="Salju",
+	LeafyGrass="Rumput Daun",Rock="Batuan",Slate="Batu Tulis",Basalt="Basalt",
+	Cobblestone="Bebatuan",Granite="Granit",Limestone="Batu Kapur",
+	Pavement="Perkerasan",Salt="Garam",CrackedLava="Lava Retak",Marble="Marmer",
+	Water="Air",Ice="Es",Glacier="Gletser",
+	Brick="Batu Bata",Concrete="Beton",Plastic="Plastik",
+	Wood="Kayu",WoodPlanks="Papan Kayu",Metal="Logam",DiamondPlate="Berlian"
+}
+_TB.matIndex      = 1
+_TB.currentMaterial = materials[_TB.matIndex]
+
+local grassColors = {
+	{name="Hijau Muda",color=Color3.fromRGB(150,220,120)},{name="Hijau Cerah",color=Color3.fromRGB(120,200,100)},
+	{name="Hijau Normal",color=Color3.fromRGB(75,151,75)},{name="Hijau Sedang",color=Color3.fromRGB(60,140,70)},
+	{name="Hijau Tua",color=Color3.fromRGB(45,120,55)},{name="Hijau Gelap",color=Color3.fromRGB(30,100,40)},
+	{name="Hijau Lumut",color=Color3.fromRGB(80,120,60)},{name="Hijau Zamrud",color=Color3.fromRGB(50,180,100)},
+	{name="Hijau Mint",color=Color3.fromRGB(170,230,150)},{name="Hijau Daun",color=Color3.fromRGB(70,160,80)},
+	{name="Hijau Hutan",color=Color3.fromRGB(40,90,50)},{name="Hijau Zaitun",color=Color3.fromRGB(85,107,47)},
+	{name="Hijau Pinus",color=Color3.fromRGB(50,100,60)},{name="Hijau Tropis",color=Color3.fromRGB(90,180,110)},
+	{name="Hijau Pastel",color=Color3.fromRGB(140,210,130)},{name="Hijau Neon",color=Color3.fromRGB(100,255,150)},
+	{name="Hijau Apel",color=Color3.fromRGB(140,200,100)},{name="Hijau Toska",color=Color3.fromRGB(100,180,140)},
+	{name="Hijau Army",color=Color3.fromRGB(70,85,50)},{name="Hijau Botol",color=Color3.fromRGB(40,70,45)}
+}
+_TB.currentGrassColorIndex = 3
+local groundColors = {
+	{name="Coklat Muda",color=Color3.fromRGB(160,120,80)},{name="Coklat Normal",color=Color3.fromRGB(120,85,50)},
+	{name="Coklat Tanah",color=Color3.fromRGB(102,92,59)},{name="Coklat Tua",color=Color3.fromRGB(75,55,30)},
+	{name="Coklat Gelap",color=Color3.fromRGB(50,35,15)}
+}
+_TB.currentGroundColorIndex = 3
+
+local grassOnlyMaterials   = {Grass=true,LeafyGrass=true}
+local groundOnlyMaterials  = {Ground=true,Mud=true}
+local colorableMaterials   = {Grass=true,LeafyGrass=true,Ground=true,Mud=true}
+local terrainOnlyMaterials = {
+	Grass=true,Ground=true,Mud=true,Sand=true,Snow=true,LeafyGrass=true,
+	Rock=true,Slate=true,Basalt=true,Cobblestone=true,Granite=true,
+	Limestone=true,Pavement=true,Salt=true,CrackedLava=true,Marble=true,
+	Water=true,Ice=true,Glacier=true
+}
+local materialToNumber = {
+	Grass=1,Ground=2,Mud=3,Sand=4,Snow=5,LeafyGrass=6,Rock=7,Slate=8,
+	Basalt=9,Cobblestone=10,Granite=11,Limestone=12,Pavement=13,Salt=14,
+	CrackedLava=15,Marble=16,Water=17,Ice=18,Glacier=19
+}
+local materialColors = {
+	Grass=Color3.fromRGB(75,151,75),Ground=Color3.fromRGB(102,92,59),
+	Mud=Color3.fromRGB(92,64,51),Sand=Color3.fromRGB(194,178,128),
+	Snow=Color3.fromRGB(239,240,240),LeafyGrass=Color3.fromRGB(106,134,64),
+	Rock=Color3.fromRGB(110,110,110),Slate=Color3.fromRGB(85,87,98),
+	Basalt=Color3.fromRGB(60,60,60),Cobblestone=Color3.fromRGB(132,126,135),
+	Granite=Color3.fromRGB(130,130,130),Limestone=Color3.fromRGB(230,228,220),
+	Pavement=Color3.fromRGB(115,115,115),Salt=Color3.fromRGB(230,230,230),
+	CrackedLava=Color3.fromRGB(232,88,40),Marble=Color3.fromRGB(220,220,230),
+	Water=Color3.fromRGB(0,162,255),Ice=Color3.fromRGB(175,221,255),
+	Glacier=Color3.fromRGB(200,230,255),Brick=Color3.fromRGB(138,86,62),
+	Concrete=Color3.fromRGB(150,150,150),Plastic=Color3.fromRGB(255,255,255),
+	Wood=Color3.fromRGB(139,94,60),WoodPlanks=Color3.fromRGB(160,110,75),
+	Metal=Color3.fromRGB(200,200,200),DiamondPlate=Color3.fromRGB(170,170,170)
+}
+local materialEnum = {
+	Grass=Enum.Material.Grass,Ground=Enum.Material.Ground,Mud=Enum.Material.Mud,
+	Sand=Enum.Material.Sand,Snow=Enum.Material.Snow,LeafyGrass=Enum.Material.LeafyGrass,
+	Rock=Enum.Material.Rock,Slate=Enum.Material.Slate,Basalt=Enum.Material.Basalt,
+	Cobblestone=Enum.Material.Cobblestone,Granite=Enum.Material.Granite,
+	Limestone=Enum.Material.Limestone,Pavement=Enum.Material.Pavement,
+	Salt=Enum.Material.Salt,CrackedLava=Enum.Material.CrackedLava,
+	Marble=Enum.Material.Marble,Water=Enum.Material.Water,Ice=Enum.Material.Ice,
+	Glacier=Enum.Material.Glacier,Brick=Enum.Material.Brick,
+	Concrete=Enum.Material.Concrete,Plastic=Enum.Material.Plastic,
+	Wood=Enum.Material.Wood,WoodPlanks=Enum.Material.WoodPlanks,
+	Metal=Enum.Material.Metal,DiamondPlate=Enum.Material.DiamondPlate
+}
+
+local shapes     = {"Balok","Bola","Baji","Silinder","Sudut"}
+_TB.shapeIndex = 1
+_TB.currentShape = "Balok"
+
+_TB.terrainDataByMaterial = {}
+_TB.lastBrushPos   = nil
+_TB.brushTrailParts = {}
+_TB.swipeData      = {}
+
+-- [A1] Data sea level untuk konversi
+_TB.seaLevelData = {}  -- {y, matName, areaSize, grR, grG, grB}
+
+-- [A2] Data replace untuk konversi
+_TB.replaceData  = {}  -- {fromMat, toMat, grR, grG, grB}
+
+-- ═══════════════════════════════════════════════════════════
+-- HELPERS
+-- ═══════════════════════════════════════════════════════════
+local function makeDraggable(frame, handle)
+	local h = handle or frame
+	local dragging, dragStart, startPos = false, nil, nil
+	h.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true; dragStart = input.Position; startPos = frame.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then dragging = false end
+			end)
+		end
+	end)
+	h.InputChanged:Connect(function(input)
+		if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging then
+			local d = input.Position - dragStart
+			frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset+d.X, startPos.Y.Scale, startPos.Y.Offset+d.Y)
+		end
+	end)
+end
+
+local function colorToRGB(c) return math.floor(c.R*255+0.5),math.floor(c.G*255+0.5),math.floor(c.B*255+0.5) end
+local function getActiveColorRGB(matName)
+	if grassOnlyMaterials[matName] then return colorToRGB(grassColors[_TB.currentGrassColorIndex].color)
+	elseif groundOnlyMaterials[matName] then return colorToRGB(groundColors[_TB.currentGroundColorIndex].color) end
+	return 0,0,0
+end
+local function getFolder(matName)
+	local f = Workspace:FindFirstChild(matName)
+	if not f then f=Instance.new("Folder");f.Name=matName;f.Parent=Workspace end
+	return f
+end
+local function getTotalTerrainCount()
+	local n = 0
+	for _,list in pairs(_TB.terrainDataByMaterial) do
+		for _,d in ipairs(list) do if not d._undone then n=n+1 end end
+	end
+	return n
+end
+
+local deletedFolder = Workspace:FindFirstChild("DeletedParts") or Instance.new("Folder")
+deletedFolder.Name="DeletedParts"; deletedFolder.Parent=Workspace; deletedFolder.Archivable=false
+
+-- ═══════════════════════════════════════════════════════════
+-- VOLUME & SIZE ACCURATE
+-- ═══════════════════════════════════════════════════════════
+local function calcVolume(shape, sx, sy, sz)
+	if shape=="Bola" then local r=sx/2; return (4/3)*math.pi*r*r*r
+	elseif shape=="Silinder" then local r=math.max(sx,sz)*0.6/2; return math.pi*r*r*sy
+	elseif shape=="Baji" or shape=="Sudut" then return sx*sy*sz*0.5
+	else return sx*sy*sz end
+end
+local function getAccurateSize(shape, sx, sy, sz)
+	if shape=="Bola" then local r=sx/2; return Vector3.new(r*2,r*2,r*2),r
+	elseif shape=="Silinder" then return Vector3.new(sx,sy,sz),math.max(sx,sz)*0.6
+	else return Vector3.new(sx,sy,sz),nil end
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- PERSISTENT CONFIG
+-- ═══════════════════════════════════════════════════════════
+local function saveColorsPersistent()
+	local config = Workspace:FindFirstChild("TerrainBuilderConfig") or Instance.new("Configuration")
+	config.Name="TerrainBuilderConfig"; config.Parent=Workspace; config.Archivable=true
+	local function sv(name,cls,val)
+		local v=config:FindFirstChild(name) or Instance.new(cls)
+		v.Name=name;v.Value=val;v.Parent=config;v.Archivable=true
+	end
+	sv("GrassColorIndex","IntValue",_TB.currentGrassColorIndex)
+	sv("GrassR","NumberValue",grassColors[_TB.currentGrassColorIndex].color.R)
+	sv("GrassG","NumberValue",grassColors[_TB.currentGrassColorIndex].color.G)
+	sv("GrassB","NumberValue",grassColors[_TB.currentGrassColorIndex].color.B)
+	sv("GroundColorIndex","IntValue",_TB.currentGroundColorIndex)
+	sv("GroundR","NumberValue",groundColors[_TB.currentGroundColorIndex].color.R)
+	sv("GroundG","NumberValue",groundColors[_TB.currentGroundColorIndex].color.G)
+	sv("GroundB","NumberValue",groundColors[_TB.currentGroundColorIndex].color.B)
+	local T=Workspace:FindFirstChild("Terrain")
+	if T then
+		T:SetMaterialColor(Enum.Material.Grass,grassColors[_TB.currentGrassColorIndex].color)
+		T:SetMaterialColor(Enum.Material.LeafyGrass,grassColors[_TB.currentGrassColorIndex].color)
+		T:SetMaterialColor(Enum.Material.Ground,groundColors[_TB.currentGroundColorIndex].color)
+		T:SetMaterialColor(Enum.Material.Mud,groundColors[_TB.currentGroundColorIndex].color)
+	end
+end
+local function loadColorsPersistent()
+	local config=Workspace:FindFirstChild("TerrainBuilderConfig"); if not config then return end
+	local gi=config:FindFirstChild("GrassColorIndex")
+	if gi and grassColors[gi.Value] then _TB.currentGrassColorIndex=gi.Value end
+	local gri=config:FindFirstChild("GroundColorIndex")
+	if gri and groundColors[gri.Value] then _TB.currentGroundColorIndex=gri.Value end
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- TERRAIN CORE
+-- ═══════════════════════════════════════════════════════════
+local function applyMaterialColor(T, matName, matE)
+	if grassOnlyMaterials[matName] then T:SetMaterialColor(matE,grassColors[_TB.currentGrassColorIndex].color)
+	elseif groundOnlyMaterials[matName] then T:SetMaterialColor(matE,groundColors[_TB.currentGroundColorIndex].color) end
+end
+
+local function doTerrainFill(T, pos, size, shape, matE, rot)
+	local cf=CFrame.new(pos)*CFrame.Angles(0,math.rad(rot or 0),0)
+	local accSize,accRadius=getAccurateSize(shape,size.X,size.Y,size.Z)
+	if shape=="Bola" then T:FillBall(pos,accRadius,matE)
+	elseif shape=="Silinder" then T:FillCylinder(cf*CFrame.Angles(0,0,math.rad(90)),size.Y,accRadius,matE)
+	else T:FillBlock(cf,accSize,matE) end
+end
+
+local function applyTerrainForPart(part, matName)
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	if not terrainOnlyMaterials[matName] then return end
+	local matE=materialEnum[matName]; if not matE then return end
+	pcall(function()
+		local sz=part.Size
+		local shapeStr=part:IsA("WedgePart") and "Baji" or
+			(part.Shape==Enum.PartType.Ball and "Bola" or
+			(part.Shape==Enum.PartType.Cylinder and "Silinder" or "Balok"))
+		local accSize,accRadius=getAccurateSize(shapeStr,sz.X,sz.Y,sz.Z)
+		if part.Shape==Enum.PartType.Ball then T:FillBall(part.Position,accRadius,matE)
+		elseif part.Shape==Enum.PartType.Cylinder then T:FillCylinder(part.CFrame*CFrame.Angles(0,0,math.rad(90)),sz.Y,accRadius,matE)
+		else T:FillBlock(part.CFrame,accSize,matE) end
+		applyMaterialColor(T,matName,matE)
+	end)
+end
+
+local function applyTerrainDirectly(pos, size, shape, matName, rotDeg)
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return nil end
+	if not terrainOnlyMaterials[matName] then return nil end
+	local matE=materialEnum[matName]; if not matE then return nil end
+	if not _TB.terrainDataByMaterial[matName] then _TB.terrainDataByMaterial[matName]={} end
+	local isColorable=colorableMaterials[matName] and true or false
+	local sR,sG,sB=0,0,0
+	if isColorable then sR,sG,sB=getActiveColorRGB(matName) end
+	local rot=rotDeg or 0
+	local vol=calcVolume(shape,size.X,size.Y,size.Z)
+	local entry={position=pos,size=size,shape=shape,material=matName,isColorable=isColorable,grR=sR,grG=sG,grB=sB,rotation=rot,volume=vol,_undone=false}
+	table.insert(_TB.terrainDataByMaterial[matName],entry)
+	pcall(function() doTerrainFill(T,pos,size,shape,matE,rot); applyMaterialColor(T,matName,matE) end)
+	return entry
+end
+
+local function convertPartsToTerrain()
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return 0 end
+	local c=0
+	for _,matName in ipairs(materials) do
+		if terrainOnlyMaterials[matName] then
+			local f=Workspace:FindFirstChild(matName)
+			if f then for _,part in ipairs(f:GetChildren()) do
+				if part:IsA("BasePart") then pcall(function() applyTerrainForPart(part,matName);c=c+1 end) end
+			end end
+		end
+	end
+	return c
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- [A1] SEA LEVEL — isi Water di bawah Y target
+-- Data disimpan ke _TB.seaLevelData agar masuk konversi script
+-- ═══════════════════════════════════════════════════════════
+local function applySeaLevel(targetY, matName, areaHalfSize)
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return false end
+	local matE=materialEnum[matName] or Enum.Material.Water
+	local stepSize=8
+	local R=areaHalfSize or 200
+	local isColorable=colorableMaterials[matName] and true or false
+	local grR,grG,grB=0,0,0
+	if isColorable then grR,grG,grB=getActiveColorRGB(matName) end
+	pcall(function()
+		for dx=-R,R,stepSize do
+			for dz=-R,R,stepSize do
+				-- Isi dari bawah (targetY-areaHalfSize) sampai targetY
+				local fillPos=Vector3.new(dx,targetY-stepSize/2,dz)
+				local fillSize=Vector3.new(stepSize,stepSize,stepSize)
+				T:FillBlock(CFrame.new(fillPos),fillSize,matE)
+			end
+			task.wait()
+		end
+		applyMaterialColor(T,matName,matE)
+	end)
+	-- Simpan ke _TB.seaLevelData untuk konversi
+	table.insert(_TB.seaLevelData,{
+		y=targetY, matName=matName, areaSize=R,
+		isColorable=isColorable, grR=grR, grG=grG, grB=grB,
+		stepSize=stepSize
+	})
+	return true
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- [A2] REPLACE MATERIAL
+-- Ganti semua terrain material X → Y
+-- Data disimpan ke _TB.replaceData agar masuk konversi script
+-- ═══════════════════════════════════════════════════════════
+local function doReplaceMaterial(fromMat, toMat)
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return 0 end
+	local fromEnum=materialEnum[fromMat]; local toEnum=materialEnum[toMat]
+	if not fromEnum or not toEnum then return 0 end
+	local count=0
+	-- Replace di _TB.terrainDataByMaterial (data brush)
+	if _TB.terrainDataByMaterial[fromMat] then
+		-- Pindahkan semua entry dari fromMat ke toMat
+		if not _TB.terrainDataByMaterial[toMat] then _TB.terrainDataByMaterial[toMat]={} end
+		for _,entry in ipairs(_TB.terrainDataByMaterial[fromMat]) do
+			if not entry._undone then
+				entry.material=toMat
+				local isColorable=colorableMaterials[toMat] and true or false
+				entry.isColorable=isColorable
+				if isColorable then entry.grR,entry.grG,entry.grB=getActiveColorRGB(toMat)
+				else entry.grR,entry.grG,entry.grB=0,0,0 end
+				table.insert(_TB.terrainDataByMaterial[toMat],entry)
+				-- Re-fill di terrain
+				pcall(function()
+					doTerrainFill(T,entry.position,entry.size,entry.shape,toEnum,entry.rotation)
+					applyMaterialColor(T,toMat,toEnum)
+				end)
+				count=count+1
+			end
+		end
+		_TB.terrainDataByMaterial[fromMat]={}
+	end
+	-- Simpan operasi replace ke _TB.replaceData untuk konversi
+	local isColorable=colorableMaterials[toMat] and true or false
+	local grR,grG,grB=0,0,0
+	if isColorable then grR,grG,grB=getActiveColorRGB(toMat) end
+	table.insert(_TB.replaceData,{fromMat=fromMat,toMat=toMat,isColorable=isColorable,grR=grR,grG=grG,grB=grB})
+	return count
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- UNDO / REDO
+-- ═══════════════════════════════════════════════════════════
+
+local function updateTitleCounter()
+	if _TB.titleLabel then
+		local n=getTotalTerrainCount()
+		_TB.titleLabel.Text = n>0
+			and ("🏗️ TB V13 ☣SYGKMUNII☣ ["..n.."/"..TERRAIN_LIMIT.."]")
+			or  "🏗️ Terrain Builder V13 ☣BY SYGKMUNII☣"
+	end
+end
+
+local function pushUndo(entry)
+	table.insert(_TB.brushUndoStack,entry)
+	if #_TB.brushUndoStack>150 then table.remove(_TB.brushUndoStack,1) end
+	_TB.brushRedoStack={}
+end
+
+local function undoBrushTerrain()
+	if #_TB.brushUndoStack==0 then return end
+	local last=table.remove(_TB.brushUndoStack)
+	table.insert(_TB.brushRedoStack,last)
+	local T=Workspace:FindFirstChild("Terrain")
+	if last.type=="swipe" then
+		local data=_TB.swipeData[last.index]
+		if data then
+			data._undone=true
+			if T then pcall(function()
+				local cf=CFrame.new(data.position)*CFrame.Angles(0,math.rad(data.rotation or 0),0)
+				T:FillBlock(cf,data.size,Enum.Material.Air)
+			end) end
+		end
+	elseif last.type=="terrain" then
+		local matName=last.matName; local idx=last.index
+		local data=_TB.terrainDataByMaterial[matName] and _TB.terrainDataByMaterial[matName][idx]
+		if data then
+			data._undone=true
+			if T then pcall(function()
+				local cf=CFrame.new(data.position)*CFrame.Angles(0,math.rad(data.rotation or 0),0)
+				if data.shape=="Bola" then T:FillBall(data.position,data.size.X/2,Enum.Material.Air)
+				elseif data.shape=="Silinder" then T:FillCylinder(cf*CFrame.Angles(0,0,math.rad(90)),data.size.Y,math.max(data.size.X,data.size.Z)*0.6,Enum.Material.Air)
+				else T:FillBlock(cf,data.size,Enum.Material.Air) end
+			end) end
+			if _TB.limitReached and getTotalTerrainCount()<TERRAIN_LIMIT then
+				_TB.limitReached=false
+				if UI.brushTerrainOnlyBtn and _TB.brushTerrainOnly then
+					UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: ON ["..getTotalTerrainCount().."/"..TERRAIN_LIMIT.."]"
+				end
+			end
+		end
+	end
+	updateTitleCounter()
+end
+
+local function redoBrushTerrain()
+	if #_TB.brushRedoStack==0 then return end
+	local entry=table.remove(_TB.brushRedoStack)
+	table.insert(_TB.brushUndoStack,entry)
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	if entry.type=="swipe" then
+		local data=_TB.swipeData[entry.index]
+		if data then data._undone=false; pcall(function() doTerrainFill(T,data.position,data.size,data.shape,materialEnum[data.material],data.rotation); applyMaterialColor(T,data.material,materialEnum[data.material]) end) end
+	elseif entry.type=="terrain" then
+		local data=_TB.terrainDataByMaterial[entry.matName] and _TB.terrainDataByMaterial[entry.matName][entry.index]
+		if data then data._undone=false; pcall(function() doTerrainFill(T,data.position,data.size,data.shape,materialEnum[data.material],data.rotation); applyMaterialColor(T,data.material,materialEnum[data.material]) end) end
+	end
+	updateTitleCounter()
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- BRUSH FUNCTIONS
+-- ═══════════════════════════════════════════════════════════
+local function brushTerrainOnly_Pure(pos)
+	if _TB.limitReached then return end
+	if not terrainOnlyMaterials[_TB.currentMaterial] then return end
+	local t=tick(); if t-_TB.lastBrushTime<_TB.brushCooldown then return end
+	local minDist=_TB.currentShape=="Bola" and (_TB.currentBlockSize.X/2)*1.2 or math.min(_TB.width,_TB.height,_TB.depth)*0.9
+	if _TB.lastBrushPos and (pos-_TB.lastBrushPos).Magnitude<minDist then return end
+	if getTotalTerrainCount()>=TERRAIN_LIMIT then
+		_TB.limitReached=true;_TB.brushTerrainOnly=false
+		if UI.brushTerrainOnlyBtn then UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: OFF";UI.brushTerrainOnlyBtn.BackgroundColor3=Color3.fromRGB(80,60,100) end
+		return
+	end
+	_TB.lastBrushTime=t;_TB.lastBrushPos=pos
+	local entry=applyTerrainDirectly(pos,_TB.currentBlockSize,_TB.currentShape,_TB.currentMaterial,_TB.rotationAngle)
+	if entry then
+		local idx=#_TB.terrainDataByMaterial[_TB.currentMaterial]
+		pushUndo({type="terrain",matName=_TB.currentMaterial,index=idx,data=entry})
+		if UI.brushTerrainOnlyBtn then UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: ON ["..getTotalTerrainCount().."/"..TERRAIN_LIMIT.."]" end
+		updateTitleCounter()
+	end
+end
+
+local function brushTerrainContinuous(pos)
+	if not terrainOnlyMaterials[_TB.currentMaterial] then return end
+	if _TB.lastBrushPos and (pos-_TB.lastBrushPos).Magnitude<(math.min(_TB.width,_TB.height,_TB.depth)*0.3) then return end
+	_TB.lastBrushPos=pos
+	local folder=getFolder(_TB.currentMaterial)
+	local part
+	if _TB.currentShape=="Bola" then part=Instance.new("Part");part.Shape=Enum.PartType.Ball
+	elseif _TB.currentShape=="Silinder" then part=Instance.new("Part");part.Shape=Enum.PartType.Cylinder
+		part.CFrame=CFrame.new(pos)*CFrame.Angles(0,math.rad(_TB.rotationAngle),0)*CFrame.Angles(0,0,math.rad(90))
+	elseif _TB.currentShape=="Baji" or _TB.currentShape=="Sudut" then part=Instance.new("WedgePart")
+	else part=Instance.new("Part") end
+	part.Size=_TB.currentBlockSize;part.Material=materialEnum[_TB.currentMaterial] or Enum.Material.Plastic
+	part.Color=materialColors[_TB.currentMaterial] or Color3.new(1,1,1)
+	part.Anchored=true;part.CanCollide=true;part.CastShadow=false
+	if _TB.currentShape~="Silinder" then part.CFrame=CFrame.new(pos)*CFrame.Angles(0,math.rad(_TB.rotationAngle),0) end
+	if _TB.currentMaterial=="Water" then part.Transparency=0.5;part.CanCollide=false
+	elseif _TB.currentMaterial=="Ice" or _TB.currentMaterial=="Glacier" then part.Transparency=0.3 end
+	part.Parent=folder
+	table.insert(_TB.brushTrailParts,part)
+	if _TB.autoConvertToTerrain then applyTerrainForPart(part,_TB.currentMaterial) end
+	pcall(function() part:SetNetworkOwner(nil) end)
+end
+
+local function createTunnel(pos)
+	if not pos then return end
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	local cf=CFrame.new(pos)*CFrame.Angles(0,math.rad(_TB.rotationAngle),0)
+	if _TB.currentShape=="Bola" then T:FillBall(pos,_TB.currentBlockSize.X/2,Enum.Material.Air)
+	elseif _TB.currentShape=="Silinder" then T:FillCylinder(cf*CFrame.Angles(0,0,math.rad(90)),_TB.currentBlockSize.Y,math.max(_TB.currentBlockSize.X,_TB.currentBlockSize.Z)*0.6,Enum.Material.Air)
+	else T:FillBlock(cf,_TB.currentBlockSize,Enum.Material.Air) end
+	local r=math.max(_TB.width,_TB.height,_TB.depth)*0.7
+	for _,matName in ipairs(materials) do
+		local f=Workspace:FindFirstChild(matName)
+		if f then for _,p in ipairs(f:GetChildren()) do if p:IsA("BasePart") and (p.Position-pos).Magnitude<r then p:Destroy() end end end
+	end
+end
+
+local function brushSwipe(pos)
+	if not pos then return end
+	local t=tick(); if t-_TB.lastSwipeBrushTime<_TB.swipeBrushCooldown then return end
+	if _TB.lastSwipePos and (pos-_TB.lastSwipePos).Magnitude<(math.min(_TB.width,_TB.height,_TB.depth)*0.4) then return end
+	_TB.lastSwipeBrushTime=t;_TB.lastSwipePos=pos
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	local targetMat=materialEnum[_TB.currentMaterial]; if not targetMat then return end
+	local swipeSize=Vector3.new(_TB.width,math.max(_TB.height,8),_TB.depth)
+	local fillPos=Vector3.new(pos.X,pos.Y-(swipeSize.Y*0.5),pos.Z)
+	local cf=CFrame.new(fillPos)*CFrame.Angles(0,math.rad(_TB.rotationAngle),0)
+	local vol=calcVolume(_TB.currentShape,swipeSize.X,swipeSize.Y,swipeSize.Z)
+	pcall(function()
+		if _TB.currentShape=="Bola" then T:FillBall(pos,swipeSize.X/2,targetMat)
+		elseif _TB.currentShape=="Silinder" then T:FillCylinder(cf*CFrame.Angles(0,0,math.rad(90)),swipeSize.Y,math.max(swipeSize.X,swipeSize.Z)*0.6,targetMat)
+		else T:FillBlock(cf,swipeSize,targetMat) end
+		applyMaterialColor(T,_TB.currentMaterial,targetMat)
+	end)
+	local isColorable=colorableMaterials[_TB.currentMaterial] and true or false
+	local r,g,b=0,0,0
+	if isColorable then r,g,b=getActiveColorRGB(_TB.currentMaterial) end
+	table.insert(_TB.swipeData,{position=fillPos,size=swipeSize,shape=_TB.currentShape,material=_TB.currentMaterial,isColorable=isColorable,grR=r,grG=g,grB=b,rotation=_TB.rotationAngle,volume=vol,_undone=false})
+	pushUndo({type="swipe",index=#_TB.swipeData})
+end
+
+local function brushTree(pos)
+	if not pos then return end
+	local t=tick(); if t-_TB.lastTreeBrushTime<_TB.treeBrushCooldown then return end
+	_TB.lastTreeBrushTime=t
+	local treeFolder=Workspace:FindFirstChild("POHON"); if not treeFolder then warn("⚠ Folder 'POHON' tidak ditemukan!"); return end
+	local originals={}
+	for _,v in ipairs(treeFolder:GetChildren()) do
+		if not v:GetAttribute("PohonClone") then table.insert(originals,v) end
+	end
+	if #originals==0 then return end
+	local clone=originals[math.random(1,#originals)]:Clone()
+	clone:SetAttribute("PohonClone",true)
+	local randRot=math.random(0,360)
+	if clone:IsA("Model") then
+		local ok,cf,sz=pcall(function() return clone:GetBoundingBox() end)
+		if ok and cf and sz then
+			clone:PivotTo(CFrame.new(pos.X,pos.Y+(cf.Position.Y-sz.Y/2),pos.Z)*CFrame.Angles(0,math.rad(randRot),0))
+		else clone:PivotTo(CFrame.new(pos)) end
+	elseif clone:IsA("BasePart") then
+		clone.CFrame=CFrame.new(pos)*CFrame.Angles(0,math.rad(randRot),0);clone.Anchored=true
+	end
+	clone.Parent=treeFolder
+end
+
+-- Special brushes
+local function brushFlatten(pos)
+	if not pos then return end
+	local t=tick(); if t-_TB.lastSpecialBrushTime<_TB.specialBrushCooldown then return end; _TB.lastSpecialBrushTime=t
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	local matE=materialEnum[_TB.currentMaterial] or Enum.Material.Grass
+	local r=math.max(_TB.width,_TB.depth)*(_TB.brushStrength*0.5); local step=4
+	pcall(function()
+		for dx=-r,r,step do for dz=-r,r,step do
+			if dx*dx+dz*dz<=r*r then
+				T:FillBlock(CFrame.new(pos.X+dx,_TB.flattenTargetY+step*2,pos.Z+dz),Vector3.new(step,step*4,step),Enum.Material.Air)
+				T:FillBlock(CFrame.new(pos.X+dx,_TB.flattenTargetY,pos.Z+dz),Vector3.new(step,step,step),matE)
+			end
+		end end
+		applyMaterialColor(T,_TB.currentMaterial,matE)
+	end)
+end
+local function brushSmooth(pos)
+	if not pos then return end
+	local t=tick(); if t-_TB.lastSpecialBrushTime<_TB.specialBrushCooldown then return end; _TB.lastSpecialBrushTime=t
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	local r=math.max(_TB.width,_TB.depth)*(_TB.brushStrength*0.4); local step=4
+	local matE=materialEnum[_TB.currentMaterial] or Enum.Material.Grass
+	pcall(function()
+		for _,off in ipairs({Vector3.new(step,0,0),Vector3.new(-step,0,0),Vector3.new(0,0,step),Vector3.new(0,0,-step)}) do
+			T:FillBall((pos+pos+off*(r/step))*0.5,step*0.8,matE)
+		end
+		applyMaterialColor(T,_TB.currentMaterial,matE)
+	end)
+end
+local function brushErode(pos)
+	if not pos then return end
+	local t=tick(); if t-_TB.lastSpecialBrushTime<_TB.specialBrushCooldown then return end; _TB.lastSpecialBrushTime=t
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	pcall(function() T:FillBall(pos,math.max(_TB.width,_TB.depth)*(_TB.brushStrength*0.5),Enum.Material.Air) end)
+end
+local function brushGrow(pos)
+	if not pos then return end
+	local t=tick(); if t-_TB.lastSpecialBrushTime<_TB.specialBrushCooldown then return end; _TB.lastSpecialBrushTime=t
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	local matE=materialEnum[_TB.currentMaterial] or Enum.Material.Grass
+	local r=math.max(_TB.width,_TB.depth)*(_TB.brushStrength*0.5)
+	pcall(function() T:FillBall(pos,r,matE); applyMaterialColor(T,_TB.currentMaterial,matE) end)
+end
+local function brushPaint(pos)
+	if not pos then return end
+	local t=tick(); if t-_TB.lastSpecialBrushTime<_TB.specialBrushCooldown then return end; _TB.lastSpecialBrushTime=t
+	local T=Workspace:FindFirstChild("Terrain"); if not T then return end
+	if not terrainOnlyMaterials[_TB.currentMaterial] then return end
+	local matE=materialEnum[_TB.currentMaterial]; if not matE then return end
+	local r=math.max(_TB.width,_TB.depth)*(_TB.brushStrength*0.4)
+	pcall(function()
+		if _TB.currentShape=="Bola" then T:FillBall(pos,r,matE)
+		else T:FillBlock(CFrame.new(pos)*CFrame.Angles(0,math.rad(_TB.rotationAngle),0),Vector3.new(r*2,_TB.height,r*2),matE) end
+		applyMaterialColor(T,_TB.currentMaterial,matE)
+	end)
+end
+
+local function clearProject()
+	for _,matName in ipairs(materials) do
+		local f=Workspace:FindFirstChild(matName); if f then f:ClearAllChildren() end
+	end
+	_TB.brushTrailParts={};_TB.lastBrushPos=nil;_TB.lastBrushTime=0
+	_TB.terrainDataByMaterial={};_TB.brushUndoStack={};_TB.brushRedoStack={}
+	_TB.swipeData={};_TB.lastSwipePos=nil;_TB.limitReached=false
+	_TB.seaLevelData={};_TB.replaceData={}
+	updateTitleCounter()
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- GENERATE SCRIPT — SYNC SEMUA OPERASI (brush+sealevel+replace)
+-- ═══════════════════════════════════════════════════════════
+local function makeScriptHeader(totalData, totalVol, part, totalParts)
+	local partInfo=totalParts>1 and (" | Bagian "..part.."/"..totalParts) or ""
+	local L={}
+	table.insert(L,"-- ════════════════════════════════════════")
+	table.insert(L,"-- Terrain Script | BY SYGKMUNII V13"..partInfo)
+	table.insert(L,"-- Total titik  : "..totalData)
+	table.insert(L,string.format("-- Total volume : %.1f studs³",totalVol))
+	if totalParts>1 then table.insert(L,"-- ⚠ Jalankan semua bagian berurutan!") end
+	table.insert(L,"-- ════════════════════════════════════════")
+	table.insert(L,"local T=workspace.Terrain")
+	table.insert(L,"local M={[1]=Enum.Material.Grass,[2]=Enum.Material.Ground,[3]=Enum.Material.Mud,")
+	table.insert(L,"[4]=Enum.Material.Sand,[5]=Enum.Material.Snow,[6]=Enum.Material.LeafyGrass,")
+	table.insert(L,"[7]=Enum.Material.Rock,[8]=Enum.Material.Slate,[9]=Enum.Material.Basalt,")
+	table.insert(L,"[10]=Enum.Material.Cobblestone,[11]=Enum.Material.Granite,[12]=Enum.Material.Limestone,")
+	table.insert(L,"[13]=Enum.Material.Pavement,[14]=Enum.Material.Salt,[15]=Enum.Material.CrackedLava,")
+	table.insert(L,"[16]=Enum.Material.Marble,[17]=Enum.Material.Water,[18]=Enum.Material.Ice,[19]=Enum.Material.Glacier}")
+	table.insert(L,"-- sh:1=Balok 2=Bola 3=Baji 4=Silinder 5=Sudut")
+	table.insert(L,"local D={")
+	return table.concat(L,"\n")
+end
+local function makeScriptFooter(seaBlocks, replaceOps)
+	local L={}
+	table.insert(L,"}")
+	table.insert(L,"for i,d in ipairs(D)do")
+	table.insert(L," local m=M[d.m]")
+	table.insert(L," local cf=CFrame.new(d.p)*CFrame.Angles(0,math.rad(d.rot or 0),0)")
+	table.insert(L," if d.sh==2 then T:FillBall(d.p,d.sx/2,m)")
+	table.insert(L," elseif d.sh==4 then T:FillCylinder(cf*CFrame.Angles(0,0,math.rad(90)),d.sy,math.max(d.sx,d.sz)*0.6,m)")
+	table.insert(L," else T:FillBlock(cf,Vector3.new(d.sx,d.sy,d.sz),m) end")
+	table.insert(L," if d.r then T:SetMaterialColor(m,Color3.fromRGB(d.r,d.g,d.b)) end")
+	table.insert(L," if i%20==0 then task.wait() end")
+	table.insert(L,"end")
+	-- [A1] Sea Level blocks dalam footer
+	if seaBlocks and #seaBlocks>0 then
+		table.insert(L,"-- === SEA LEVEL ===")
+		for _,sl in ipairs(seaBlocks) do
+			local mnStr=sl.matName
+			table.insert(L,string.format(
+				"do local slM=Enum.Material.%s; local slR=%d; local slStep=%d",
+				mnStr, sl.areaSize, sl.stepSize))
+			table.insert(L,string.format(
+				" local slY=%.2f", sl.y))
+			table.insert(L," for dx=-slR,slR,slStep do for dz=-slR,slR,slStep do")
+			table.insert(L,"  T:FillBlock(CFrame.new(dx,slY-slStep/2,dz),Vector3.new(slStep,slStep,slStep),slM)")
+			table.insert(L," end task.wait() end")
+			if sl.isColorable then
+				table.insert(L,string.format(
+					" T:SetMaterialColor(slM,Color3.fromRGB(%d,%d,%d))",
+					sl.grR,sl.grG,sl.grB))
+			end
+			table.insert(L,"end")
+		end
+	end
+	-- [A2] Replace operations dalam footer
+	if replaceOps and #replaceOps>0 then
+		table.insert(L,"-- === REPLACE MATERIAL ===")
+		for _,rp in ipairs(replaceOps) do
+			table.insert(L,string.format(
+				"-- Note: Replace %s→%s sudah diterapkan pada data D di atas",
+				rp.fromMat, rp.toMat))
+		end
+	end
+	return table.concat(L,"\n")
+end
+local function entryToLine(e, isLast)
+	local comma=isLast and "" or ","
+	local mn=materialToNumber[e.material] or 1
+	local sn=(e.shape=="Balok"and 1)or(e.shape=="Bola"and 2)or(e.shape=="Baji"and 3)or(e.shape=="Silinder"and 4)or 5
+	local rot=e.rotation or 0
+	if e.isColorable then
+		return string.format("{p=Vector3.new(%.2f,%.2f,%.2f),sx=%.2f,sy=%.2f,sz=%.2f,m=%d,sh=%d,r=%d,g=%d,b=%d,rot=%d}%s",
+			e.position.X,e.position.Y,e.position.Z,e.size.X,e.size.Y,e.size.Z,mn,sn,e.grR,e.grG,e.grB,rot,comma)
+	else
+		return string.format("{p=Vector3.new(%.2f,%.2f,%.2f),sx=%.2f,sy=%.2f,sz=%.2f,m=%d,sh=%d,rot=%d}%s",
+			e.position.X,e.position.Y,e.position.Z,e.size.X,e.size.Y,e.size.Z,mn,sn,rot,comma)
+	end
+end
+
+local function generateScriptChunks()
+	local allData,totalData={},0
+	for _,list in pairs(_TB.terrainDataByMaterial) do
+		for _,d in ipairs(list) do if not d._undone then table.insert(allData,d);totalData=totalData+1 end end
+	end
+	for _,d in ipairs(_TB.swipeData) do
+		if not d._undone then table.insert(allData,d);totalData=totalData+1 end
+	end
+	if totalData==0 and #_TB.seaLevelData==0 then return nil end
+	local totalVol=0
+	for _,e in ipairs(allData) do totalVol=totalVol+(e.volume or 0) end
+	local dataLines={}
+	for i,e in ipairs(allData) do table.insert(dataLines,entryToLine(e,i==#allData)) end
+	local HEADER_EST,FOOTER_EST=800,600
+	local DATA_BUDGET=SCRIPT_CHAR_LIMIT-HEADER_EST-FOOTER_EST
+	-- Bagi data ke chunks
+	local chunks={}
+	local curLines,curSize={},0
+	for _,line in ipairs(dataLines) do
+		local ls=#line+1
+		if curSize+ls>DATA_BUDGET and #curLines>0 then
+			table.insert(chunks,curLines);curLines={};curSize=0
+		end
+		table.insert(curLines,line);curSize=curSize+ls
+	end
+	if #curLines>0 then table.insert(chunks,curLines) end
+	if #chunks==0 then table.insert(chunks,{}) end  -- minimal 1 chunk untuk sea level
+	local totalChunks=#chunks
+	local result={}
+	for ci,lines in ipairs(chunks) do
+		local isLast=ci==totalChunks
+		local header=makeScriptHeader(totalData,totalVol,ci,totalChunks)
+		-- Sea level dan replace hanya di chunk terakhir
+		local footer=makeScriptFooter(isLast and _TB.seaLevelData or {}, isLast and _TB.replaceData or {})
+		local dataStr=table.concat(lines,"\n")
+		local full=header.."\n"..dataStr.."\n"..footer
+		table.insert(result,{content=full,part=ci,totalParts=totalChunks,charCount=#full})
+	end
+	return result
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- FILE STORAGE
+-- ═══════════════════════════════════════════════════════════
+local function getNextTerrainIndex()
+	local i=1
+	while i<=9999 do
+		local exists=pcall(function() readfile(HASIL_FOLDER.."/Terrain"..i..".txt") end)
+		if not exists then return i end
+		i=i+1
+	end
+	return i
+end
+
+local function saveChunksToStorage(chunks)
+	safeMakeFolder(DELTA_WORKSPACE);safeMakeFolder(HASIL_FOLDER)
+	local baseIndex=getNextTerrainIndex()
+	local savedFiles={}
+	if #chunks==1 then
+		local fn="Terrain"..baseIndex..".txt"
+		local fp=HASIL_FOLDER.."/"..fn
+		local ok,err=safeWriteFile(fp,chunks[1].content)
+		table.insert(savedFiles,{ok=ok,path=fp,name=fn,err=err})
+	else
+		for _,chunk in ipairs(chunks) do
+			local fn="Terrain"..baseIndex.."_part"..chunk.part..".txt"
+			local fp=HASIL_FOLDER.."/"..fn
+			local ok,err=safeWriteFile(fp,chunk.content)
+			table.insert(savedFiles,{ok=ok,path=fp,name=fn,err=err})
+		end
+	end
+	return savedFiles
+end
+
+-- [B1] AUTO-SAVE DRAFT
+local function autoSaveDraft()
+	local chunks=generateScriptChunks()
+	if not chunks then return end
+	safeMakeFolder(DELTA_WORKSPACE);safeMakeFolder(HASIL_FOLDER)
+	safeWriteFile(AUTOSAVE_PATH,chunks[1].content)
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- BRUSH PREVIEW
+-- ═══════════════════════════════════════════════════════════
+-- BRUSH PREVIEW — Wireframe style seperti Studio
+-- ═══════════════════════════════════════════════════════════
+local previewPart=Instance.new("Part")
+previewPart.Name="BrushPreview";previewPart.Anchored=true;previewPart.CanCollide=false
+previewPart.CastShadow=false;previewPart.Transparency=1
+previewPart.Size=Vector3.new(6,6,6);previewPart.Parent=Workspace
+
+-- SelectionBox untuk wireframe outline
+local previewBox=Instance.new("SelectionBox")
+previewBox.Name="BrushPreviewBox"
+previewBox.Color3=Color3.fromRGB(0,220,255)
+previewBox.LineThickness=0.04
+previewBox.SurfaceTransparency=0.85
+previewBox.SurfaceColor3=Color3.fromRGB(0,220,255)
+previewBox.Adornee=nil
+previewBox.Parent=Workspace
+
+local function updatePreview(pos)
+	local anyActive=_TB.placementEnabled or _TB.brushTerrainOnly or _TB.swipeModeActive or _TB.tunnelMode
+		or _TB.flattenMode or _TB.smoothMode or _TB.erodeMode or _TB.growMode or _TB.paintMode or _TB.seaLevelMode
+	if not anyActive or not pos then
+		previewBox.Adornee=nil
+		previewPart.Transparency=1
+		return
+	end
+
+	-- Tentukan warna berdasarkan mode
+	local col
+	if _TB.erodeMode then col=Color3.fromRGB(255,60,60)
+	elseif _TB.tunnelMode then col=Color3.fromRGB(255,140,0)
+	elseif _TB.flattenMode then col=Color3.fromRGB(80,200,255)
+	elseif _TB.smoothMode then col=Color3.fromRGB(220,220,0)
+	elseif _TB.growMode then col=Color3.fromRGB(0,255,80)
+	elseif _TB.paintMode then col=materialColors[_TB.currentMaterial] or Color3.fromRGB(200,100,255)
+	elseif _TB.seaLevelMode then col=Color3.fromRGB(0,150,255)
+	else col=materialColors[_TB.currentMaterial] or Color3.fromRGB(0,220,255) end
+
+	previewBox.Color3=col
+	previewBox.SurfaceColor3=col
+
+	-- Update ukuran & posisi part (invisible, hanya sebagai anchor SelectionBox)
+	previewPart.Size=_TB.currentBlockSize
+	previewPart.Transparency=1
+	local cf=CFrame.new(pos)*CFrame.Angles(0,math.rad(_TB.rotationAngle),0)
+	if _TB.currentShape=="Bola" then
+		previewPart.Shape=Enum.PartType.Ball
+		previewPart.CFrame=cf
+	elseif _TB.currentShape=="Silinder" then
+		previewPart.Shape=Enum.PartType.Cylinder
+		previewPart.CFrame=cf*CFrame.Angles(0,0,math.rad(90))
+	else
+		previewPart.Shape=Enum.PartType.Block
+		previewPart.CFrame=cf
+	end
+	previewBox.Adornee=previewPart
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- [A3] HUD OVERLAY
+-- ═══════════════════════════════════════════════════════════
+local hudFrame=Instance.new("Frame")
+hudFrame.Size=UDim2.new(0,220,0,60);hudFrame.Position=UDim2.new(1,-228,0,8)
+hudFrame.BackgroundColor3=Color3.fromRGB(10,10,15);hudFrame.BackgroundTransparency=0.3
+hudFrame.BorderSizePixel=0;hudFrame.ZIndex=200;hudFrame.Parent=screenGui
+Instance.new("UICorner",hudFrame).CornerRadius=UDim.new(0,8)
+local hudMode=Instance.new("TextLabel")
+hudMode.Size=UDim2.new(1,0,0,28);hudMode.BackgroundTransparency=1
+hudMode.TextColor3=Color3.fromRGB(0,220,255);hudMode.Font=Enum.Font.GothamBold;hudMode.TextSize=13
+hudMode.Text="MODE: —";hudMode.ZIndex=201;hudMode.Parent=hudFrame
+local hudSize=Instance.new("TextLabel")
+hudSize.Size=UDim2.new(1,0,0,22);hudSize.Position=UDim2.new(0,0,0,30)
+hudSize.BackgroundTransparency=1;hudSize.TextColor3=Color3.fromRGB(200,200,200)
+hudSize.Font=Enum.Font.Gotham;hudSize.TextSize=11
+hudSize.Text="L:6 T:6 D:6 | Rot:0° | Str:5";hudSize.ZIndex=201;hudSize.Parent=hudFrame
+
+local function updateHUD()
+	local modeStr="—"
+	if _TB.flattenMode then modeStr="📐 FLATTEN"
+	elseif _TB.smoothMode then modeStr="✨ SMOOTH"
+	elseif _TB.erodeMode then modeStr="🌊 ERODE"
+	elseif _TB.growMode then modeStr="🌱 GROW"
+	elseif _TB.paintMode then modeStr="🎨 PAINT"
+	elseif _TB.seaLevelMode then modeStr="🌊 SEA LEVEL"
+	elseif _TB.tunnelMode then modeStr="🕳️ GALI"
+	elseif _TB.brushTerrainOnly and _TB.placementEnabled then modeStr="🏔️ TANPA PART"
+	elseif _TB.swipeMode and _TB.swipeModeActive then modeStr="🖌️ USAP"
+	elseif _TB.treeBrushReady and _TB.treeBrushActive then modeStr="🌳 POHON"
+	elseif _TB.placementEnabled then modeStr="✏️ BRUSH [".._TB.currentMaterial.."]"
+	end
+	hudMode.Text="MODE: "..modeStr
+	hudSize.Text=string.format("L:%d T:%d D:%d | Rot:%d° | Str:%d | Spd:%d",_TB.width,_TB.height,_TB.depth,_TB.rotationAngle,_TB.brushStrength,_TB.brushSpeed)
+end
+
+-- ═══════════════════════════════════════════════════════════
+local UI = {}  -- UI widget references
+
+local function _setupWidgets()
+-- UI SETUP — TAB SYSTEM [A5]
+-- ═══════════════════════════════════════════════════════════
+pluginFrame.Size=UDim2.new(0,PANEL_W,0,PANEL_H)
+pluginFrame.Position=UDim2.new(0.5,-145,0.5,-145)
+pluginFrame.BackgroundColor3=Color3.fromRGB(22,22,28)
+pluginFrame.BorderSizePixel=0;pluginFrame.Active=true;pluginFrame.Draggable=false
+pluginFrame.ClipsDescendants=true;pluginFrame.Visible=true;pluginFrame.ZIndex=10
+Instance.new("UICorner",pluginFrame).CornerRadius=UDim.new(0,10)
+makeDraggable(pluginFrame)
+
+-- Title bar — klik = minimize [B4]
+UI.titleBar =Instance.new("TextButton")
+UI.titleBar.Size=UDim2.new(1,0,0,28);UI.titleBar.BackgroundColor3=Color3.fromRGB(30,30,40)
+UI.titleBar.BorderSizePixel=0;UI.titleBar.ZIndex=11;UI.titleBar.Text="";UI.titleBar.AutoButtonColor=false
+UI.titleBar.Parent=pluginFrame
+Instance.new("UICorner",UI.titleBar).CornerRadius=UDim.new(0,10)
+makeDraggable(pluginFrame,UI.titleBar)
+
+_TB.titleLabel=Instance.new("TextLabel")
+_TB.titleLabel.Size=UDim2.new(1,-10,1,0);_TB.titleLabel.Position=UDim2.new(0,5,0,0)
+_TB.titleLabel.BackgroundTransparency=1;_TB.titleLabel.Text="🏗️ Terrain Builder V13 ☣BY SYGKMUNII☣"
+_TB.titleLabel.TextColor3=Color3.fromRGB(255,255,255);_TB.titleLabel.Font=Enum.Font.GothamBold
+_TB.titleLabel.TextSize=11;_TB.titleLabel.TextXAlignment=Enum.TextXAlignment.Left
+_TB.titleLabel.ZIndex=12;_TB.titleLabel.Parent=UI.titleBar
+
+-- Minimize indicator
+UI.minIcon =Instance.new("TextLabel")
+UI.minIcon.Size=UDim2.new(0,20,1,0);UI.minIcon.Position=UDim2.new(1,-22,0,0)
+UI.minIcon.BackgroundTransparency=1;UI.minIcon.Text="▼"
+UI.minIcon.TextColor3=Color3.fromRGB(180,180,180);UI.minIcon.Font=Enum.Font.Gotham;UI.minIcon.TextSize=11
+UI.minIcon.ZIndex=12;UI.minIcon.Parent=UI.titleBar
+
+-- Content container (semua konten di bawah title)
+UI.contentFrame =Instance.new("Frame")
+UI.contentFrame.Size=UDim2.new(1,0,1,-28);UI.contentFrame.Position=UDim2.new(0,0,0,28)
+UI.contentFrame.BackgroundTransparency=1;UI.contentFrame.ZIndex=10;UI.contentFrame.Parent=pluginFrame
+
+-- [B4] Minimize logic
+UI.titleBar.MouseButton1Click:Connect(function()
+	_TB.panelMinimized=not _TB.panelMinimized
+	if _TB.panelMinimized then
+		pluginFrame.Size=UDim2.new(0,PANEL_W,0,28)
+		UI.contentFrame.Visible=false
+		UI.minIcon.Text="▶"
+	else
+		pluginFrame.Size=UDim2.new(0,PANEL_W,0,PANEL_H)
+		UI.contentFrame.Visible=true
+		UI.minIcon.Text="▼"
+	end
+end)
+
+-- TAB BAR
+UI.tabBar =Instance.new("Frame")
+UI.tabBar.Size=UDim2.new(1,0,0,26);UI.tabBar.BackgroundColor3=Color3.fromRGB(18,18,24)
+UI.tabBar.BorderSizePixel=0;UI.tabBar.ZIndex=11;UI.tabBar.Parent=UI.contentFrame
+local tabNames={"ADD","REMOVE","PAINT","TOOL"}
+_TB.tabNames = tabNames
+UI.tabBtns ={}
+UI.tabW =PANEL_W/#tabNames
+UI.tabColors ={ADD=Color3.fromRGB(40,120,60),REMOVE=Color3.fromRGB(140,40,40),PAINT=Color3.fromRGB(100,40,140),TOOL=Color3.fromRGB(40,80,140)}
+
+-- Tab scroll frames
+UI.tabFrames ={}
+for _,tn in ipairs(tabNames) do
+	local sf=Instance.new("ScrollingFrame")
+	sf.Name="Tab_"..tn
+	sf.Size=UDim2.new(1,0,1,-26);sf.Position=UDim2.new(0,0,0,26)
+	sf.BackgroundTransparency=1;sf.BorderSizePixel=0
+	sf.ScrollBarThickness=5;sf.ScrollBarImageColor3=Color3.fromRGB(80,80,100)
+	sf.CanvasSize=UDim2.new(0,0,0,400);sf.Visible=tn=="ADD"
+	sf.ZIndex=10;sf.Parent=UI.contentFrame
+	UI.tabFrames[tn]=sf
+end
+
+local function switchTab(tn)
+	_TB.activeTab=tn
+	for _,n in ipairs(tabNames) do
+		UI.tabFrames[n].Visible=(n==tn)
+		if UI.tabBtns[n] then
+			UI.tabBtns[n].BackgroundColor3=n==tn and UI.tabColors[n] or Color3.fromRGB(35,35,45)
+		end
+	end
+end
+_TB.switchTab = switchTab
+
+for i,tn in ipairs(tabNames) do
+	local tb=Instance.new("TextButton")
+	tb.Size=UDim2.new(0,UI.tabW,1,0);tb.Position=UDim2.new(0,(i-1)*UI.tabW,0,0)
+	tb.Text=tn;tb.Font=Enum.Font.GothamBold;tb.TextSize=10
+	tb.TextColor3=Color3.fromRGB(255,255,255)
+	tb.BackgroundColor3=tn=="ADD" and UI.tabColors[tn] or Color3.fromRGB(35,35,45)
+	tb.BorderSizePixel=0;tb.ZIndex=12;tb.Parent=UI.tabBar
+	UI.tabBtns[tn]=tb
+	tb.MouseButton1Click:Connect(function() switchTab(tn) end)
+end
+
+-- ─── HELPER untuk buat widget di dalam tab ─────────────────
+local function mkBtn(parent,name,pos,text,sizeX,sizeY,color)
+	local btn=Instance.new("TextButton")
+	btn.Name=name;btn.Size=UDim2.new(0,sizeX or 80,0,sizeY or 26);btn.Position=pos;btn.Text=text
+	btn.BackgroundColor3=color or Color3.fromRGB(50,50,62)
+	btn.TextColor3=Color3.new(1,1,1);btn.Font=Enum.Font.GothamSemibold;btn.TextSize=11
+	btn.BorderSizePixel=0;btn.AutoButtonColor=false;btn.ZIndex=10;btn.Parent=parent
+	Instance.new("UICorner",btn).CornerRadius=UDim.new(0,6)
+	local oc=color or Color3.fromRGB(50,50,62)
+	btn.MouseEnter:Connect(function() btn.BackgroundColor3=Color3.fromRGB(70,70,88) end)
+	btn.MouseLeave:Connect(function() btn.BackgroundColor3=oc end)
+	return btn
+end
+local function mkLbl(parent,name,pos,text,size)
+	local lbl=Instance.new("TextLabel")
+	lbl.Name=name;lbl.Size=size or UDim2.new(0,80,0,22);lbl.Position=pos;lbl.Text=text
+	lbl.BackgroundTransparency=1;lbl.TextColor3=Color3.fromRGB(210,210,210);lbl.Font=Enum.Font.Gotham
+	lbl.TextSize=11;lbl.TextXAlignment=Enum.TextXAlignment.Left;lbl.ZIndex=10;lbl.Parent=parent
+	return lbl
+end
+local function mkSep(parent,yPos)
+	local s=Instance.new("Frame")
+	s.Size=UDim2.new(0,274,0,1);s.Position=UDim2.new(0,4,0,yPos)
+	s.BackgroundColor3=Color3.fromRGB(50,50,62);s.BorderSizePixel=0;s.ZIndex=10;s.Parent=parent
+end
+local function mkCatLabel(parent,yPos,text)
+	local l=Instance.new("TextLabel")
+	l.Size=UDim2.new(1,-8,0,18);l.Position=UDim2.new(0,4,0,yPos)
+	l.BackgroundColor3=Color3.fromRGB(35,35,50);l.BorderSizePixel=0
+	l.Text="  "..text;l.Font=Enum.Font.GothamBold;l.TextSize=10
+	l.TextColor3=Color3.fromRGB(150,200,255);l.TextXAlignment=Enum.TextXAlignment.Left
+	l.ZIndex=10;l.Parent=parent
+	Instance.new("UICorner",l).CornerRadius=UDim.new(0,4)
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- TAB ADD — Material, Ukuran, Rotasi, Grass/Ground, Brush
+-- ═══════════════════════════════════════════════════════════
+UI.sfADD =UI.tabFrames["ADD"]; UI.sfADD.CanvasSize=UDim2.new(0,0,0,460)
+local sfADD=UI.sfADD
+
+mkLbl(sfADD,"MatLbl",UDim2.new(0,5,0,5),"Material:",UDim2.new(0,60,0,22))
+UI.matBtn =mkBtn(sfADD,"MatBtn",UDim2.new(0,68,0,5),materialNames[_TB.currentMaterial] or _TB.currentMaterial,210,22,Color3.fromRGB(55,55,75))
+mkLbl(sfADD,"ShpLbl",UDim2.new(0,5,0,32),"Bentuk:",UDim2.new(0,60,0,22))
+UI.shapeBtn =mkBtn(sfADD,"ShpBtn",UDim2.new(0,68,0,32),_TB.currentShape,210,22,Color3.fromRGB(55,55,75))
+mkSep(sfADD,59)
+
+mkLbl(sfADD,"GrLbl",UDim2.new(0,5,0,64),"🌿 Rumput:",UDim2.new(0,58,0,22))
+UI.grassColorBtn =mkBtn(sfADD,"GrassBtn",UDim2.new(0,66,0,64),grassColors[_TB.currentGrassColorIndex].name,160,22,grassColors[_TB.currentGrassColorIndex].color)
+UI.grassPrevBtn =mkBtn(sfADD,"GrPrev",UDim2.new(0,230,0,64),"◀",22,22)
+UI.grassNextBtn =mkBtn(sfADD,"GrNext",UDim2.new(0,255,0,64),"▶",22,22)
+mkLbl(sfADD,"GndLbl",UDim2.new(0,5,0,90),"🟫 Tanah:",UDim2.new(0,58,0,22))
+UI.groundColorBtn =mkBtn(sfADD,"GndBtn",UDim2.new(0,66,0,90),groundColors[_TB.currentGroundColorIndex].name,160,22,groundColors[_TB.currentGroundColorIndex].color)
+UI.groundPrevBtn =mkBtn(sfADD,"GndPrev",UDim2.new(0,230,0,90),"◀",22,22)
+UI.groundNextBtn =mkBtn(sfADD,"GndNext",UDim2.new(0,255,0,90),"▶",22,22)
+mkSep(sfADD,116)
+
+mkLbl(sfADD,"LblL",UDim2.new(0,4,0,121),"L:",UDim2.new(0,14,0,22))
+UI.widthMinus =mkBtn(sfADD,"WM",UDim2.new(0,20,0,121),"-",22,22)
+UI.widthLabel =mkLbl(sfADD,"WV",UDim2.new(0,45,0,121),tostring(_TB.width),UDim2.new(0,18,0,22))
+UI.widthPlus =mkBtn(sfADD,"WP",UDim2.new(0,65,0,121),"+",22,22)
+mkLbl(sfADD,"LblT",UDim2.new(0,93,0,121),"T:",UDim2.new(0,14,0,22))
+UI.heightMinus =mkBtn(sfADD,"HM",UDim2.new(0,109,0,121),"-",22,22)
+UI.heightLabel =mkLbl(sfADD,"HV",UDim2.new(0,134,0,121),tostring(_TB.height),UDim2.new(0,18,0,22))
+UI.heightPlus =mkBtn(sfADD,"HP",UDim2.new(0,154,0,121),"+",22,22)
+mkLbl(sfADD,"LblD",UDim2.new(0,182,0,121),"D:",UDim2.new(0,14,0,22))
+UI.depthMinus =mkBtn(sfADD,"DM",UDim2.new(0,198,0,121),"-",22,22)
+UI.depthLabel =mkLbl(sfADD,"DV",UDim2.new(0,223,0,121),tostring(_TB.depth),UDim2.new(0,18,0,22))
+UI.depthPlus =mkBtn(sfADD,"DP",UDim2.new(0,243,0,121),"+",22,22)
+mkSep(sfADD,147)
+
+mkLbl(sfADD,"RotLbl",UDim2.new(0,5,0,152),"🔄 Rotasi:",UDim2.new(0,58,0,22))
+UI.rotAngles ={0,45,90,135,180};UI.rotIndex =1
+UI.rotPrevBtn =mkBtn(sfADD,"RotP",UDim2.new(0,66,0,152),"◀",22,22)
+UI.rotDisplay =mkLbl(sfADD,"RotD",UDim2.new(0,91,0,152),"0°",UDim2.new(0,32,0,22))
+UI.rotDisplay.TextXAlignment=Enum.TextXAlignment.Center
+UI.rotNextBtn =mkBtn(sfADD,"RotN",UDim2.new(0,125,0,152),"▶",22,22)
+mkBtn(sfADD,"R0",UDim2.new(0,152,0,152),"0°",28,22,Color3.fromRGB(40,80,140)).MouseButton1Click:Connect(function() _TB.rotationAngle=0;UI.rotIndex=1;UI.rotDisplay.Text="0°";updateHUD() end)
+mkBtn(sfADD,"R90",UDim2.new(0,182,0,152),"90°",32,22,Color3.fromRGB(40,80,140)).MouseButton1Click:Connect(function() _TB.rotationAngle=90;UI.rotIndex=3;UI.rotDisplay.Text="90°";updateHUD() end)
+mkBtn(sfADD,"R180",UDim2.new(0,216,0,152),"180°",35,22,Color3.fromRGB(40,80,140)).MouseButton1Click:Connect(function() _TB.rotationAngle=180;UI.rotIndex=5;UI.rotDisplay.Text="180°";updateHUD() end)
+mkSep(sfADD,178)
+
+UI.autoTerrainBtn =mkBtn(sfADD,"AutoTBtn",UDim2.new(0,5,0,183),"🌍 Auto Terrain: OFF",278,22,Color3.fromRGB(75,55,100))
+UI.brushTerrainOnlyBtn=mkBtn(sfADD,"BrushTBtn",UDim2.new(0,5,0,209),"🏔️ TANPA PART: OFF",278,22,Color3.fromRGB(75,55,100))
+UI.treeBrushBtn =mkBtn(sfADD,"TreeBtn",UDim2.new(0,5,0,235),"🌳 BRUSH POHON: OFF",278,22,Color3.fromRGB(35,75,45))
+UI.swipeModeBtn=mkBtn(sfADD,"SwipeBtn",UDim2.new(0,5,0,261),"🖌️ MODE USAP: OFF",278,22,Color3.fromRGB(55,35,85))
+UI.convertBtn =mkBtn(sfADD,"ConvBtn",UDim2.new(0,5,0,287),"⚡ Ubah Parts ke Terrain",278,22,Color3.fromRGB(90,45,140))
+mkSep(sfADD,313)
+
+-- [A4] Speed brush slider
+mkLbl(sfADD,"SpeedLbl",UDim2.new(0,5,0,318),"⚡ Speed:",UDim2.new(0,55,0,22))
+UI.speedMinus =mkBtn(sfADD,"SpM",UDim2.new(0,62,0,318),"-",22,22,Color3.fromRGB(80,50,50))
+UI.speedDisplay =mkLbl(sfADD,"SpV",UDim2.new(0,87,0,318),"5",UDim2.new(0,22,0,22))
+UI.speedDisplay.TextXAlignment=Enum.TextXAlignment.Center
+UI.speedPlus =mkBtn(sfADD,"SpP",UDim2.new(0,112,0,318),"+",22,22,Color3.fromRGB(50,80,50))
+mkLbl(sfADD,"StrLbl",UDim2.new(0,145,0,318),"💪 Str:",UDim2.new(0,42,0,22))
+UI.strMinus =mkBtn(sfADD,"StrM",UDim2.new(0,190,0,318),"-",22,22,Color3.fromRGB(80,50,50))
+UI.strDisplay =mkLbl(sfADD,"StrV",UDim2.new(0,215,0,318),"5",UDim2.new(0,22,0,22))
+UI.strDisplay.TextXAlignment=Enum.TextXAlignment.Center
+UI.strPlus =mkBtn(sfADD,"StrP",UDim2.new(0,240,0,318),"+",22,22,Color3.fromRGB(50,80,50))
+UI.lockYBtn =mkBtn(sfADD,"LockY",UDim2.new(0,5,0,344),"🔓 Lock Y: OFF",135,22,Color3.fromRGB(55,55,85))
+mkSep(sfADD,370)
+
+-- Save
+UI.convertToScriptBtn =mkBtn(sfADD,"SaveBtn",UDim2.new(0,5,0,375),"💾 SIMPAN KE DELTA",215,26,Color3.fromRGB(0,130,70))
+UI.clearBtn =mkBtn(sfADD,"ClrBtn",UDim2.new(0,225,0,375),"🗑️ CLEAR",58,26,Color3.fromRGB(130,35,35))
+
+-- ═══════════════════════════════════════════════════════════
+-- TAB REMOVE — Tunnel, Erode, Sea Level
+-- ═══════════════════════════════════════════════════════════
+UI.sfRM =UI.tabFrames["REMOVE"]; UI.sfRM.CanvasSize=UDim2.new(0,0,0,360)
+local sfRM=UI.sfRM
+mkCatLabel(sfRM,5,"HAPUS TERRAIN")
+UI.tunnelBtn =mkBtn(sfRM,"TunnelBtn",UDim2.new(0,5,0,28),"🕳️ Mode Gali: OFF",278,26,Color3.fromRGB(70,70,110))
+UI.erodeBtn =mkBtn(sfRM,"ErodeBtn",UDim2.new(0,5,0,59),"🌊 ERODE: OFF",278,26,Color3.fromRGB(100,35,35))
+mkSep(sfRM,90)
+mkCatLabel(sfRM,95,"SEA LEVEL")
+mkLbl(sfRM,"SLYLbl",UDim2.new(0,5,0,118),"Level Y:",UDim2.new(0,55,0,22))
+UI.slYMinus =mkBtn(sfRM,"SlM",UDim2.new(0,62,0,118),"-",26,22,Color3.fromRGB(80,50,50))
+UI.slYDisplay =mkLbl(sfRM,"SlV",UDim2.new(0,91,0,118),"0",UDim2.new(0,36,0,22))
+UI.slYDisplay.TextXAlignment=Enum.TextXAlignment.Center
+UI.slYPlus =mkBtn(sfRM,"SlP",UDim2.new(0,130,0,118),"+",26,22,Color3.fromRGB(50,80,50))
+UI.slSnap =mkBtn(sfRM,"SlSnap",UDim2.new(0,163,0,118),"📍 Ambil Y",106,22,Color3.fromRGB(45,75,120))
+mkLbl(sfRM,"SLRLbl",UDim2.new(0,5,0,145),"Radius:",UDim2.new(0,52,0,22))
+UI.slRadiusMinus =mkBtn(sfRM,"SlRM",UDim2.new(0,60,0,145),"-",26,22,Color3.fromRGB(80,50,50))
+UI.slRadiusVal =100
+UI.slRadiusDisp =mkLbl(sfRM,"SlRV",UDim2.new(0,89,0,145),"100",UDim2.new(0,40,0,22))
+UI.slRadiusDisp.TextXAlignment=Enum.TextXAlignment.Center
+UI.slRadiusPlus =mkBtn(sfRM,"SlRP",UDim2.new(0,132,0,145),"+",26,22,Color3.fromRGB(50,80,50))
+UI.seaLevelBtn =mkBtn(sfRM,"SeaBtn",UDim2.new(0,5,0,172),"🌊 APPLY SEA LEVEL",278,26,Color3.fromRGB(0,80,160))
+mkSep(sfRM,203)
+mkCatLabel(sfRM,208,"FLATTEN / RATAKAN")
+UI.flattenBtn =mkBtn(sfRM,"FlatBtn",UDim2.new(0,5,0,231),"📐 FLATTEN: OFF",136,22,Color3.fromRGB(25,75,115))
+mkLbl(sfRM,"FYLbl",UDim2.new(0,146,0,231),"Y:",UDim2.new(0,18,0,22))
+UI.flatYMinus =mkBtn(sfRM,"FYM",UDim2.new(0,166,0,231),"-",22,22,Color3.fromRGB(80,50,50))
+UI.flatYDisplay =mkLbl(sfRM,"FYV",UDim2.new(0,191,0,231),"0",UDim2.new(0,30,0,22))
+UI.flatYDisplay.TextXAlignment=Enum.TextXAlignment.Center
+UI.flatYPlus =mkBtn(sfRM,"FYP",UDim2.new(0,224,0,231),"+",22,22,Color3.fromRGB(50,80,50))
+UI.flatYSnap =mkBtn(sfRM,"FYSnap",UDim2.new(0,249,0,231),"📍",28,22,Color3.fromRGB(45,75,120))
+UI.smoothBtn =mkBtn(sfRM,"SmoothBtn",UDim2.new(0,5,0,258),"✨ SMOOTH: OFF",278,22,Color3.fromRGB(80,80,25))
+mkSep(sfRM,285)
+mkCatLabel(sfRM,290,"GROW / KEMBANGKAN")
+UI.growBtn =mkBtn(sfRM,"GrowBtn",UDim2.new(0,5,0,313),"🌱 GROW: OFF",278,22,Color3.fromRGB(35,95,35))
+
+-- ═══════════════════════════════════════════════════════════
+-- TAB PAINT — Paint, Replace Material, Material List
+-- ═══════════════════════════════════════════════════════════
+UI.sfPA =UI.tabFrames["PAINT"]; UI.sfPA.CanvasSize=UDim2.new(0,0,0,400)
+local sfPA=UI.sfPA
+mkCatLabel(sfPA,5,"CAT MATERIAL")
+UI.paintBtn =mkBtn(sfPA,"PaintBtn",UDim2.new(0,5,0,28),"🎨 PAINT: OFF",278,26,Color3.fromRGB(75,35,95))
+mkSep(sfPA,59)
+mkCatLabel(sfPA,64,"REPLACE MATERIAL")
+mkLbl(sfPA,"RepFromLbl",UDim2.new(0,5,0,87),"Dari:",UDim2.new(0,38,0,22))
+UI.repFromBtn =mkBtn(sfPA,"RepFrom",UDim2.new(0,46,0,87),materialNames[_TB.replaceSrcMat] or _TB.replaceSrcMat,115,22,materialColors[_TB.replaceSrcMat] or Color3.fromRGB(60,60,80))
+mkLbl(sfPA,"RepArrow",UDim2.new(0,165,0,87),"→",UDim2.new(0,16,0,22))
+UI.repToBtn =mkBtn(sfPA,"RepTo",UDim2.new(0,183,0,87),materialNames[_TB.replaceDstMat] or _TB.replaceDstMat,100,22,materialColors[_TB.replaceDstMat] or Color3.fromRGB(60,60,80))
+UI.replaceBtn =mkBtn(sfPA,"RepBtn",UDim2.new(0,5,0,114),"🔄 REPLACE SEKARANG",278,26,Color3.fromRGB(120,60,0))
+mkSep(sfPA,145)
+mkCatLabel(sfPA,150,"PILIH MATERIAL (KATEGORI)")
+-- Material list by category [B5]
+UI.catOrder ={"Alam","Air","Buatan"}
+UI.catColors ={Alam=Color3.fromRGB(40,100,40),Air=Color3.fromRGB(0,80,160),Buatan=Color3.fromRGB(80,50,120)}
+local yOff =172
+for _,cat in ipairs(UI.catOrder) do
+	mkCatLabel(sfPA,yOff,cat); yOff=yOff+22
+	local col=0
+	for _,matName in ipairs(materials) do
+		if materialCategory[matName]==cat then
+			local xpos=col*(95+3)+5
+			local mb=mkBtn(sfPA,"M_"..matName,UDim2.new(0,xpos,0,yOff),materialNames[matName] or matName,93,20,materialColors[matName] or Color3.fromRGB(80,80,80))
+			mb.TextSize=9
+			mb.MouseButton1Click:Connect(function()
+				for j,m in ipairs(materials) do if m==matName then _TB.matIndex=j;_TB.currentMaterial=matName;break end end
+				UI.matBtn.Text=materialNames[matName] or matName
+				updateHUD()
+			end)
+			col=col+1
+			if col>=3 then col=0;yOff=yOff+24 end
+		end
+	end
+	if col>0 then yOff=yOff+24 end
+	yOff=yOff+4
+end
+UI.sfPA.CanvasSize=UDim2.new(0,0,0,yOff+10)
+
+-- ═══════════════════════════════════════════════════════════
+-- TAB TOOL — File list, Stats, Autosave info
+-- ═══════════════════════════════════════════════════════════
+UI.sfTL =UI.tabFrames["TOOL"]; UI.sfTL.CanvasSize=UDim2.new(0,0,0,420)
+local sfTL=UI.sfTL
+mkCatLabel(sfTL,5,"STATISTIK TERRAIN")
+UI.statsLabel =mkLbl(sfTL,"StatsLbl",UDim2.new(0,5,0,28),"—",UDim2.new(1,-10,0,60))
+UI.statsLabel.TextXAlignment=Enum.TextXAlignment.Left;UI.statsLabel.TextYAlignment=Enum.TextYAlignment.Top
+UI.statsLabel.Font=Enum.Font.Code;UI.statsLabel.TextSize=10;UI.statsLabel.TextWrapped=true
+UI.refreshStatsBtn =mkBtn(sfTL,"RefreshStats",UDim2.new(0,5,0,92),"🔄 Refresh Stats",135,22,Color3.fromRGB(40,80,140))
+mkSep(sfTL,119)
+mkCatLabel(sfTL,124,"FILE HASIL KONVERSI")
+UI.fileListScroll =Instance.new("ScrollingFrame")
+UI.fileListScroll.Size=UDim2.new(1,-8,0,160);UI.fileListScroll.Position=UDim2.new(0,4,0,147)
+UI.fileListScroll.BackgroundColor3=Color3.fromRGB(15,15,20);UI.fileListScroll.BorderSizePixel=0
+UI.fileListScroll.ScrollBarThickness=4;UI.fileListScroll.CanvasSize=UDim2.new(0,0,0,0)
+UI.fileListScroll.ZIndex=10;UI.fileListScroll.Parent=sfTL
+Instance.new("UICorner",UI.fileListScroll).CornerRadius=UDim.new(0,6)
+UI.fileListLayout =Instance.new("UIListLayout")
+UI.fileListLayout.Padding=UDim.new(0,3);UI.fileListLayout.Parent=UI.fileListScroll
+UI.fileListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	UI.fileListScroll.CanvasSize=UDim2.new(0,0,0,UI.fileListLayout.AbsoluteContentSize.Y+6)
+end)
+UI.refreshFilesBtn =mkBtn(sfTL,"RefFiles",UDim2.new(0,5,0,312),"📂 Refresh File List",278,22,Color3.fromRGB(40,80,140))
+mkSep(sfTL,339)
+mkCatLabel(sfTL,344,"AUTO-SAVE")
+UI.autosaveLabel =mkLbl(sfTL,"ASLabel",UDim2.new(0,5,0,367),"Auto-save tiap 5 menit ke _autosave.txt",UDim2.new(1,-10,0,30))
+UI.autosaveLabel.TextWrapped=true;UI.autosaveLabel.TextSize=10;UI.autosaveLabel.TextColor3=Color3.fromRGB(160,160,160)
+UI.manualSaveBtn =mkBtn(sfTL,"ManSave",UDim2.new(0,5,0,400),"💾 Manual Auto-Save Sekarang",278,22,Color3.fromRGB(40,100,60))
+
+-- ═══════════════════════════════════════════════════════════
+-- SIDE BUTTONS
+-- ═══════════════════════════════════════════════════════════
+local function mkSideBtn(text,yPos,bgColor)
+	local b=Instance.new("TextButton")
+	b.Size=UDim2.new(0,46,0,46);b.Position=UDim2.new(0,12,0,yPos)
+	b.Text=text;b.BackgroundColor3=bgColor
+	b.TextColor3=Color3.new(1,1,1);b.Font=Enum.Font.GothamBold;b.TextSize=22
+	b.BorderSizePixel=0;b.ZIndex=100;b.Parent=screenGui
+	Instance.new("UICorner",b).CornerRadius=UDim.new(1,0)
+	return b
+end
+UI.toggleLogo = mkSideBtn("⚒️",60,  Color3.fromRGB(20,20,28))
+UI.quickDisableBtn = mkSideBtn("🚫",115, Color3.fromRGB(115,35,35))
+UI.ulangOutsideBtn = mkSideBtn("🔄",170, Color3.fromRGB(130,95,25))
+UI.redoOutsideBtn = mkSideBtn("↪️",225, Color3.fromRGB(95,75,25))
+UI.matListToggleBtn = mkSideBtn("📋",280, Color3.fromRGB(45,75,115))
+
+-- Material list panel (popup)
+UI.matListPanel =Instance.new("Frame")
+UI.matListPanel.Name="MatListPanel";UI.matListPanel.Size=UDim2.new(0,280,0,280)
+UI.matListPanel.BackgroundColor3=Color3.fromRGB(20,20,28);UI.matListPanel.BorderSizePixel=0
+UI.matListPanel.Visible=false;UI.matListPanel.ZIndex=50;UI.matListPanel.ClipsDescendants=true;UI.matListPanel.Parent=screenGui
+Instance.new("UICorner",UI.matListPanel).CornerRadius=UDim.new(0,10)
+UI.mlHeader =Instance.new("Frame")
+UI.mlHeader.Size=UDim2.new(1,0,0,28);UI.mlHeader.BackgroundColor3=Color3.fromRGB(32,32,44)
+UI.mlHeader.BorderSizePixel=0;UI.mlHeader.ZIndex=51;UI.mlHeader.Parent=UI.matListPanel
+Instance.new("UICorner",UI.mlHeader).CornerRadius=UDim.new(0,10)
+UI.mlTitle =Instance.new("TextLabel")
+UI.mlTitle.Size=UDim2.new(1,-32,1,0);UI.mlTitle.Position=UDim2.new(0,8,0,0)
+UI.mlTitle.Text="📋 Pilih Material";UI.mlTitle.BackgroundTransparency=1
+UI.mlTitle.TextColor3=Color3.fromRGB(255,255,255);UI.mlTitle.Font=Enum.Font.GothamBold;UI.mlTitle.TextSize=12
+UI.mlTitle.TextXAlignment=Enum.TextXAlignment.Left;UI.mlTitle.ZIndex=51;UI.mlTitle.Parent=UI.mlHeader
+UI.mlClose =mkBtn(UI.matListPanel,"MlClose",UDim2.new(1,-26,0,2),"✕",24,24,Color3.fromRGB(190,45,45))
+UI.mlClose.Parent=UI.matListPanel;UI.mlClose.ZIndex=52
+UI.mlScroll =Instance.new("ScrollingFrame")
+UI.mlScroll.Size=UDim2.new(1,-8,1,-36);UI.mlScroll.Position=UDim2.new(0,4,0,32)
+UI.mlScroll.BackgroundColor3=Color3.fromRGB(16,16,24);UI.mlScroll.BorderSizePixel=0
+UI.mlScroll.ScrollBarThickness=4;UI.mlScroll.ZIndex=51;UI.mlScroll.Parent=UI.matListPanel
+Instance.new("UICorner",UI.mlScroll).CornerRadius=UDim.new(0,6)
+local COLS=3;local MBW=84;local MBH=24;local MGAPX=3;local MGAPY=3
+for i,matName in ipairs(materials) do
+	local row=math.floor((i-1)/COLS);local col=(i-1)%COLS
+	local mi=Instance.new("TextButton")
+	mi.Size=UDim2.new(0,MBW,0,MBH);mi.Position=UDim2.new(0,col*(MBW+MGAPX)+3,0,row*(MBH+MGAPY)+3)
+	mi.Text=materialNames[matName] or matName;mi.BackgroundColor3=materialColors[matName] or Color3.fromRGB(100,100,100)
+	mi.TextColor3=Color3.new(1,1,1);mi.Font=Enum.Font.GothamSemibold;mi.TextSize=9
+	mi.BorderSizePixel=0;mi.ZIndex=52;mi.Parent=UI.mlScroll
+	Instance.new("UICorner",mi).CornerRadius=UDim.new(0,4)
+	mi.MouseButton1Click:Connect(function()
+		for j,m in ipairs(materials) do if m==matName then _TB.matIndex=j;_TB.currentMaterial=matName;UI.matBtn.Text=materialNames[matName] or matName;break end end
+		UI.matListPanel.Visible=false;updateHUD()
+	end)
+end
+UI.mlScroll.CanvasSize=UDim2.new(0,0,0,3+math.ceil(#materials/COLS)*(MBH+MGAPY))
+makeDraggable(UI.matListPanel,UI.mlHeader)
+RunService.RenderStepped:Connect(function()
+	if UI.matListPanel.Visible then
+		local pp=pluginFrame.AbsolutePosition;local ps=pluginFrame.AbsoluteSize
+		UI.matListPanel.Position=UDim2.new(0,pp.X+ps.X+8,0,pp.Y)
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+-- MODE HELPERS
+end
+
+local function _setupEvents()
+-- ═══════════════════════════════════════════════════════════
+local rotAngles = UI.rotAngles or {0,45,90,135,180}
+local rotIndex  = UI.rotIndex  or 1
+local function saveRotIndex(i) rotIndex=i; UI.rotIndex=i end
+local function disableAllSpecialModes()
+	_TB.flattenMode=false;_TB.smoothMode=false;_TB.erodeMode=false;_TB.growMode=false;_TB.paintMode=false;_TB.seaLevelMode=false
+end
+_TB.disableAllSpecialModes = disableAllSpecialModes
+local function updateSpecialBtns()
+	UI.flattenBtn.Text=_TB.flattenMode and "📐 FLATTEN: ON" or "📐 FLATTEN: OFF"
+	UI.flattenBtn.BackgroundColor3=_TB.flattenMode and Color3.fromRGB(0,115,195) or Color3.fromRGB(25,75,115)
+	UI.smoothBtn.Text=_TB.smoothMode and "✨ SMOOTH: ON" or "✨ SMOOTH: OFF"
+	UI.smoothBtn.BackgroundColor3=_TB.smoothMode and Color3.fromRGB(155,155,0) or Color3.fromRGB(80,80,25)
+	UI.erodeBtn.Text=_TB.erodeMode and "🌊 ERODE: ON" or "🌊 ERODE: OFF"
+	UI.erodeBtn.BackgroundColor3=_TB.erodeMode and Color3.fromRGB(175,35,35) or Color3.fromRGB(100,35,35)
+	UI.growBtn.Text=_TB.growMode and "🌱 GROW: ON" or "🌱 GROW: OFF"
+	UI.growBtn.BackgroundColor3=_TB.growMode and Color3.fromRGB(35,155,35) or Color3.fromRGB(35,95,35)
+	UI.paintBtn.Text=_TB.paintMode and "🎨 PAINT: ON" or "🎨 PAINT: OFF"
+	UI.paintBtn.BackgroundColor3=_TB.paintMode and Color3.fromRGB(125,35,155) or Color3.fromRGB(75,35,95)
+	UI.seaLevelBtn.Text=_TB.seaLevelMode and "🌊 SEA LEVEL: ACTIVE" or "🌊 APPLY SEA LEVEL"
+	UI.seaLevelBtn.BackgroundColor3=_TB.seaLevelMode and Color3.fromRGB(0,100,200) or Color3.fromRGB(0,80,160)
+end
+local function updateQuickDisableBtn()
+	if _TB.treeBrushActive then UI.quickDisableBtn.Text="🌳";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(55,135,55)
+	elseif _TB.treeBrushReady then UI.quickDisableBtn.Text="🌳";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(95,155,75)
+	elseif _TB.swipeMode and _TB.swipeModeActive then UI.quickDisableBtn.Text="🖌️";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(95,55,145)
+	elseif _TB.flattenMode then UI.quickDisableBtn.Text="📐";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(0,115,195)
+	elseif _TB.smoothMode then UI.quickDisableBtn.Text="✨";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(155,155,0)
+	elseif _TB.erodeMode then UI.quickDisableBtn.Text="🌊";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(175,35,35)
+	elseif _TB.growMode then UI.quickDisableBtn.Text="🌱";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(35,155,35)
+	elseif _TB.paintMode then UI.quickDisableBtn.Text="🎨";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(125,35,155)
+	elseif _TB.seaLevelMode then UI.quickDisableBtn.Text="🌊";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(0,100,200)
+	elseif _TB.placementEnabled then UI.quickDisableBtn.Text="✓";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(55,175,75)
+	else UI.quickDisableBtn.Text="🚫";UI.quickDisableBtn.BackgroundColor3=Color3.fromRGB(115,35,35) end
+	updateHUD()
+end
+_TB.updateSpecialBtns   = updateSpecialBtns
+_TB.updateQuickDisableBtn = updateQuickDisableBtn
+
+-- ═══════════════════════════════════════════════════════════
+-- [B2] REFRESH FILE LIST
+-- ═══════════════════════════════════════════════════════════
+local function refreshFileList()
+	for _,c in ipairs(UI.fileListScroll:GetChildren()) do
+		if not c:IsA("UIListLayout") then c:Destroy() end
+	end
+	local files=safeListFiles(HASIL_FOLDER)
+	local count=0
+	for _,fp in ipairs(files) do
+		local name=fp:match("([^/\\]+)$") or fp
+		if name:match("%.txt$") and not name:match("_autosave") then
+			count=count+1
+			local row=Instance.new("TextButton")
+			row.Size=UDim2.new(1,-6,0,22);row.BackgroundColor3=Color3.fromRGB(30,30,40)
+			row.BorderSizePixel=0;row.Text="📄 "..name;row.Font=Enum.Font.Gotham;row.TextSize=10
+			row.TextColor3=Color3.fromRGB(200,220,255);row.TextXAlignment=Enum.TextXAlignment.Left
+			row.ZIndex=11;row.Parent=UI.fileListScroll
+			Instance.new("UICorner",row).CornerRadius=UDim.new(0,4)
+			row.MouseButton1Click:Connect(function()
+				local content=safeReadFile(fp)
+				if content then pcall(function() setclipboard(content) end)
+					row.Text="✅ Di-copy! — "..name
+					task.wait(2);row.Text="📄 "..name
+				end
+			end)
+		end
+	end
+	if count==0 then
+		local empty=Instance.new("TextLabel")
+		empty.Size=UDim2.new(1,-6,0,22);empty.BackgroundTransparency=1
+		empty.Text="(belum ada file)";empty.Font=Enum.Font.Gotham;empty.TextSize=10
+		empty.TextColor3=Color3.fromRGB(140,140,140);empty.ZIndex=11;empty.Parent=UI.fileListScroll
+	end
+end
+_TB.refreshFileList = refreshFileList
+
+-- ═══════════════════════════════════════════════════════════
+-- [TOOL TAB] STATS
+-- ═══════════════════════════════════════════════════════════
+local function refreshStats()
+	local totalN=getTotalTerrainCount()
+	local totalVol=0
+	local perMat={}
+	for _,list in pairs(_TB.terrainDataByMaterial) do
+		for _,d in ipairs(list) do
+			if not d._undone then
+				totalVol=totalVol+(d.volume or 0)
+				perMat[d.material]=(perMat[d.material] or 0)+1
+			end
+		end
+	end
+	local lines={}
+	table.insert(lines,"Total titik : "..totalN.."/"..TERRAIN_LIMIT)
+	table.insert(lines,string.format("Total volume: %.0f studs³",totalVol))
+	table.insert(lines,"Swipe data  : "..#_TB.swipeData)
+	table.insert(lines,"Sea level   : "..#_TB.seaLevelData.." ops")
+	table.insert(lines,"Replace     : "..#_TB.replaceData.." ops")
+	table.insert(lines,"Undo stack  : "..#_TB.brushUndoStack)
+	local top={}
+	for m,c in pairs(perMat) do table.insert(top,{m=m,c=c}) end
+	table.sort(top,function(a,b) return a.c>b.c end)
+	for i=1,math.min(3,#top) do
+		table.insert(lines,(materialNames[top[i].m] or top[i].m)..": "..top[i].c)
+	end
+	UI.statsLabel.Text=table.concat(lines,"\n")
+end
+_TB.refreshStats = refreshStats
+
+-- ═══════════════════════════════════════════════════════════
+-- EVENT CONNECTIONS
+-- ═══════════════════════════════════════════════════════════
+UI.toggleLogo.MouseButton1Click:Connect(function()
+	_TB.panelVisible=not _TB.panelVisible;pluginFrame.Visible=_TB.panelVisible
+	UI.toggleLogo.BackgroundColor3=_TB.panelVisible and Color3.fromRGB(35,135,55) or Color3.fromRGB(20,20,28)
+end)
+UI.quickDisableBtn.MouseButton1Click:Connect(function()
+	if _TB.treeBrushReady then
+		_TB.treeBrushActive=not _TB.treeBrushActive
+		if _TB.treeBrushActive then _TB.placementEnabled=false;_TB.swipeModeActive=false;disableAllSpecialModes() end
+	elseif _TB.swipeMode then
+		_TB.swipeModeActive=not _TB.swipeModeActive
+		if _TB.swipeModeActive then _TB.placementEnabled=false;disableAllSpecialModes() end
+	elseif _TB.flattenMode or _TB.smoothMode or _TB.erodeMode or _TB.growMode or _TB.paintMode or _TB.seaLevelMode then
+		disableAllSpecialModes();updateSpecialBtns()
+	else
+		_TB.placementEnabled=not _TB.placementEnabled
+		if _TB.placementEnabled and _TB.tunnelMode then _TB.tunnelMode=false;UI.tunnelBtn.Text="🕳️ Mode Gali: OFF";UI.tunnelBtn.BackgroundColor3=Color3.fromRGB(70,70,110) end
+	end
+	updateQuickDisableBtn()
+end)
+UI.ulangOutsideBtn.MouseButton1Click:Connect(function()
+	undoBrushTerrain()
+	UI.ulangOutsideBtn.BackgroundColor3=Color3.fromRGB(55,155,75);task.wait(0.8);UI.ulangOutsideBtn.BackgroundColor3=Color3.fromRGB(130,95,25)
+	if _TB.brushTerrainOnly and UI.brushTerrainOnlyBtn then UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: ON ["..getTotalTerrainCount().."/"..TERRAIN_LIMIT.."]" end
+end)
+UI.redoOutsideBtn.MouseButton1Click:Connect(function()
+	redoBrushTerrain()
+	UI.redoOutsideBtn.BackgroundColor3=Color3.fromRGB(55,155,75);task.wait(0.8);UI.redoOutsideBtn.BackgroundColor3=Color3.fromRGB(95,75,25)
+end)
+UI.matListToggleBtn.MouseButton1Click:Connect(function()
+	UI.matListPanel.Visible=not UI.matListPanel.Visible
+	if UI.matListPanel.Visible then
+		local pp=pluginFrame.AbsolutePosition;local ps=pluginFrame.AbsoluteSize
+		UI.matListPanel.Position=UDim2.new(0,pp.X+ps.X+8,0,pp.Y)
+	end
+end)
+UI.mlClose.MouseButton1Click:Connect(function() UI.matListPanel.Visible=false end)
+
+-- TAB ADD events
+UI.matBtn.MouseButton1Click:Connect(function()
+	_TB.matIndex=_TB.matIndex%#materials+1;_TB.currentMaterial=materials[_TB.matIndex]
+	UI.matBtn.Text=materialNames[_TB.currentMaterial] or _TB.currentMaterial;updateHUD()
+end)
+UI.shapeBtn.MouseButton1Click:Connect(function()
+	_TB.shapeIndex=_TB.shapeIndex%#shapes+1;_TB.currentShape=shapes[_TB.shapeIndex];UI.shapeBtn.Text=_TB.currentShape;updateHUD()
+end)
+local function updateRotDisplay() UI.rotDisplay.Text=tostring(_TB.rotationAngle).."°";updateHUD() end
+_TB.updateRotDisplay = updateRotDisplay
+UI.rotPrevBtn.MouseButton1Click:Connect(function() rotIndex=rotIndex-1;if rotIndex<1 then rotIndex=#rotAngles end;saveRotIndex(rotIndex);_TB.rotationAngle=rotAngles[rotIndex];updateRotDisplay() end)
+UI.rotNextBtn.MouseButton1Click:Connect(function() rotIndex=rotIndex%#rotAngles+1;saveRotIndex(rotIndex);_TB.rotationAngle=rotAngles[rotIndex];updateRotDisplay() end)
+
+local function applyGrassColor() local T=Workspace:FindFirstChild("Terrain");if T then T:SetMaterialColor(Enum.Material.Grass,grassColors[_TB.currentGrassColorIndex].color);T:SetMaterialColor(Enum.Material.LeafyGrass,grassColors[_TB.currentGrassColorIndex].color) end;saveColorsPersistent() end
+local function applyGroundColor() local T=Workspace:FindFirstChild("Terrain");if T then T:SetMaterialColor(Enum.Material.Ground,groundColors[_TB.currentGroundColorIndex].color);T:SetMaterialColor(Enum.Material.Mud,groundColors[_TB.currentGroundColorIndex].color) end;saveColorsPersistent() end
+UI.grassColorBtn.MouseButton1Click:Connect(function() _TB.currentGrassColorIndex=_TB.currentGrassColorIndex%#grassColors+1;UI.grassColorBtn.Text=grassColors[_TB.currentGrassColorIndex].name;UI.grassColorBtn.BackgroundColor3=grassColors[_TB.currentGrassColorIndex].color;applyGrassColor() end)
+UI.grassPrevBtn.MouseButton1Click:Connect(function() _TB.currentGrassColorIndex=_TB.currentGrassColorIndex-1;if _TB.currentGrassColorIndex<1 then _TB.currentGrassColorIndex=#grassColors end;UI.grassColorBtn.Text=grassColors[_TB.currentGrassColorIndex].name;UI.grassColorBtn.BackgroundColor3=grassColors[_TB.currentGrassColorIndex].color;applyGrassColor() end)
+UI.grassNextBtn.MouseButton1Click:Connect(function() _TB.currentGrassColorIndex=_TB.currentGrassColorIndex%#grassColors+1;UI.grassColorBtn.Text=grassColors[_TB.currentGrassColorIndex].name;UI.grassColorBtn.BackgroundColor3=grassColors[_TB.currentGrassColorIndex].color;applyGrassColor() end)
+UI.groundColorBtn.MouseButton1Click:Connect(function() _TB.currentGroundColorIndex=_TB.currentGroundColorIndex%#groundColors+1;UI.groundColorBtn.Text=groundColors[_TB.currentGroundColorIndex].name;UI.groundColorBtn.BackgroundColor3=groundColors[_TB.currentGroundColorIndex].color;applyGroundColor() end)
+UI.groundPrevBtn.MouseButton1Click:Connect(function() _TB.currentGroundColorIndex=_TB.currentGroundColorIndex-1;if _TB.currentGroundColorIndex<1 then _TB.currentGroundColorIndex=#groundColors end;UI.groundColorBtn.Text=groundColors[_TB.currentGroundColorIndex].name;UI.groundColorBtn.BackgroundColor3=groundColors[_TB.currentGroundColorIndex].color;applyGroundColor() end)
+UI.groundNextBtn.MouseButton1Click:Connect(function() _TB.currentGroundColorIndex=_TB.currentGroundColorIndex%#groundColors+1;UI.groundColorBtn.Text=groundColors[_TB.currentGroundColorIndex].name;UI.groundColorBtn.BackgroundColor3=groundColors[_TB.currentGroundColorIndex].color;applyGroundColor() end)
+
+task.spawn(function() task.wait(1);loadColorsPersistent();UI.grassColorBtn.Text=grassColors[_TB.currentGrassColorIndex].name;UI.grassColorBtn.BackgroundColor3=grassColors[_TB.currentGrassColorIndex].color;UI.groundColorBtn.Text=groundColors[_TB.currentGroundColorIndex].name;UI.groundColorBtn.BackgroundColor3=groundColors[_TB.currentGroundColorIndex].color;applyGrassColor();applyGroundColor() end)
+
+UI.widthPlus.MouseButton1Click:Connect(function() _TB.width=math.clamp(_TB.width+2,2,100);_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth);UI.widthLabel.Text=tostring(_TB.width);updateHUD() end)
+UI.widthMinus.MouseButton1Click:Connect(function() _TB.width=math.clamp(_TB.width-2,2,100);_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth);UI.widthLabel.Text=tostring(_TB.width);updateHUD() end)
+UI.heightPlus.MouseButton1Click:Connect(function() _TB.height=math.clamp(_TB.height+2,2,100);_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth);UI.heightLabel.Text=tostring(_TB.height);updateHUD() end)
+UI.heightMinus.MouseButton1Click:Connect(function() _TB.height=math.clamp(_TB.height-2,2,100);_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth);UI.heightLabel.Text=tostring(_TB.height);updateHUD() end)
+UI.depthPlus.MouseButton1Click:Connect(function() _TB.depth=math.clamp(_TB.depth+2,2,100);_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth);UI.depthLabel.Text=tostring(_TB.depth);updateHUD() end)
+UI.depthMinus.MouseButton1Click:Connect(function() _TB.depth=math.clamp(_TB.depth-2,2,100);_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth);UI.depthLabel.Text=tostring(_TB.depth);updateHUD() end)
+
+-- [A4] Speed brush
+local function applySpeedToCooldown()
+	-- speed 1=cepat(0.01) 10=lambat(0.15)
+	_TB.brushCooldown=0.01+(_TB.brushSpeed-1)*(0.14/9)
+	_TB.swipeBrushCooldown=_TB.brushCooldown
+end
+UI.speedMinus.MouseButton1Click:Connect(function() _TB.brushSpeed=math.clamp(_TB.brushSpeed-1,1,10);UI.speedDisplay.Text=tostring(_TB.brushSpeed);applySpeedToCooldown();updateHUD() end)
+UI.speedPlus.MouseButton1Click:Connect(function() _TB.brushSpeed=math.clamp(_TB.brushSpeed+1,1,10);UI.speedDisplay.Text=tostring(_TB.brushSpeed);applySpeedToCooldown();updateHUD() end)
+UI.strMinus.MouseButton1Click:Connect(function() _TB.brushStrength=math.clamp(_TB.brushStrength-1,1,10);UI.strDisplay.Text=tostring(_TB.brushStrength);updateHUD() end)
+UI.strPlus.MouseButton1Click:Connect(function() _TB.brushStrength=math.clamp(_TB.brushStrength+1,1,10);UI.strDisplay.Text=tostring(_TB.brushStrength);updateHUD() end)
+UI.lockYBtn.MouseButton1Click:Connect(function()
+	_TB.lockY=not _TB.lockY
+	if _TB.lockY and mouse and mouse.Hit then _TB.lockedY=mouse.Hit.Position.Y;UI.lockYBtn.Text="🔒 Lock Y: "..math.floor(_TB.lockedY);UI.lockYBtn.BackgroundColor3=Color3.fromRGB(115,75,18)
+	else UI.lockYBtn.Text="🔓 Lock Y: OFF";UI.lockYBtn.BackgroundColor3=Color3.fromRGB(55,55,85) end
+end)
+UI.autoTerrainBtn.MouseButton1Click:Connect(function()
+	_TB.autoConvertToTerrain=not _TB.autoConvertToTerrain
+	UI.autoTerrainBtn.Text=_TB.autoConvertToTerrain and "🌍 Auto Terrain: ON" or "🌍 Auto Terrain: OFF"
+	UI.autoTerrainBtn.BackgroundColor3=_TB.autoConvertToTerrain and Color3.fromRGB(115,75,145) or Color3.fromRGB(75,55,100)
+	if _TB.autoConvertToTerrain and _TB.brushTerrainOnly then _TB.brushTerrainOnly=false;UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: OFF";UI.brushTerrainOnlyBtn.BackgroundColor3=Color3.fromRGB(75,55,100) end
+end)
+UI.brushTerrainOnlyBtn.MouseButton1Click:Connect(function()
+	if _TB.limitReached then UI.brushTerrainOnlyBtn.Text="🏔️ LIMIT! Tekan CLEAR";UI.brushTerrainOnlyBtn.BackgroundColor3=Color3.fromRGB(175,45,45);task.wait(2);UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: OFF";UI.brushTerrainOnlyBtn.BackgroundColor3=Color3.fromRGB(75,55,100);return end
+	_TB.brushTerrainOnly=not brushTerrainOnly;disableAllSpecialModes();updateSpecialBtns()
+	if _TB.brushTerrainOnly then
+		UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: ON ["..getTotalTerrainCount().."/"..TERRAIN_LIMIT.."]";UI.brushTerrainOnlyBtn.BackgroundColor3=Color3.fromRGB(115,95,175)
+		_TB.autoConvertToTerrain=false;UI.autoTerrainBtn.Text="🌍 Auto Terrain: OFF";UI.autoTerrainBtn.BackgroundColor3=Color3.fromRGB(75,55,100)
+	else UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: OFF";UI.brushTerrainOnlyBtn.BackgroundColor3=Color3.fromRGB(75,55,100) end
+end)
+UI.treeBrushBtn.MouseButton1Click:Connect(function()
+	_TB.treeBrushReady=not _TB.treeBrushReady
+	if _TB.treeBrushReady then _TB.treeBrushActive=false;disableAllSpecialModes();updateSpecialBtns();UI.treeBrushBtn.Text="🌳 BRUSH POHON: READY (🚫)";UI.treeBrushBtn.BackgroundColor3=Color3.fromRGB(75,125,55)
+		if not Workspace:FindFirstChild("POHON") then warn("⚠ Folder 'POHON' tidak ditemukan!") end
+	else _TB.treeBrushActive=false;UI.treeBrushBtn.Text="🌳 BRUSH POHON: OFF";UI.treeBrushBtn.BackgroundColor3=Color3.fromRGB(35,75,45) end
+	updateQuickDisableBtn()
+end)
+UI.swipeModeBtn.MouseButton1Click:Connect(function()
+	_TB.swipeMode=not _TB.swipeMode
+	if _TB.swipeMode then _TB.swipeModeActive=false;disableAllSpecialModes();updateSpecialBtns();UI.swipeModeBtn.Text="🖌️ MODE USAP: READY (🚫)";UI.swipeModeBtn.BackgroundColor3=Color3.fromRGB(95,55,145);_TB.placementEnabled=false
+	else _TB.swipeModeActive=false;UI.swipeModeBtn.Text="🖌️ MODE USAP: OFF";UI.swipeModeBtn.BackgroundColor3=Color3.fromRGB(55,35,85);_TB.placementEnabled=false;_TB.lastSwipePos=nil end
+	updateQuickDisableBtn()
+end)
+UI.convertBtn.MouseButton1Click:Connect(function()
+	UI.convertBtn.Text="⏳...";UI.convertBtn.BackgroundColor3=Color3.fromRGB(145,75,195);task.wait(0.1)
+	local c=convertPartsToTerrain()
+	UI.convertBtn.Text="✓ "..c;UI.convertBtn.BackgroundColor3=Color3.fromRGB(55,175,75)
+	task.wait(1.5);UI.convertBtn.Text="⚡ Ubah Parts ke Terrain";UI.convertBtn.BackgroundColor3=Color3.fromRGB(90,45,140)
+end)
+
+-- TAB REMOVE events
+UI.tunnelBtn.MouseButton1Click:Connect(function()
+	_TB.tunnelMode=not tunnelMode;UI.tunnelBtn.Text=_TB.tunnelMode and "🕳️ Mode Gali: ON" or "🕳️ Mode Gali: OFF"
+	UI.tunnelBtn.BackgroundColor3=_TB.tunnelMode and Color3.fromRGB(145,145,195) or Color3.fromRGB(70,70,110)
+	if _TB.tunnelMode then _TB.placementEnabled=false;disableAllSpecialModes();updateSpecialBtns();updateQuickDisableBtn() end
+end)
+UI.erodeBtn.MouseButton1Click:Connect(function()
+	disableAllSpecialModes();_TB.erodeMode=true;_TB.placementEnabled=false;_TB.tunnelMode=false
+	_TB.brushTerrainOnly=false;_TB.swipeMode=false;_TB.swipeModeActive=false;_TB.treeBrushReady=false;_TB.treeBrushActive=false
+	updateSpecialBtns();updateQuickDisableBtn()
+end)
+-- [A1] Sea Level events
+local function updateSlYDisplay() UI.slYDisplay.Text=tostring(_TB.seaLevelY) end
+UI.slYMinus.MouseButton1Click:Connect(function() _TB.seaLevelY=seaLevelY-4;updateSlYDisplay() end)
+UI.slYPlus.MouseButton1Click:Connect(function() _TB.seaLevelY=seaLevelY+4;updateSlYDisplay() end)
+UI.slSnap.MouseButton1Click:Connect(function()
+	if mouse and mouse.Hit then _TB.seaLevelY=math.floor(mouse.Hit.Position.Y);updateSlYDisplay();UI.slSnap.Text="✓";task.wait(1.5);UI.slSnap.Text="📍 Ambil Y" end
+end)
+UI.slRadiusMinus.MouseButton1Click:Connect(function() slRadiusVal=math.max(20,slRadiusVal-20);UI.slRadiusDisp.Text=tostring(slRadiusVal) end)
+UI.slRadiusPlus.MouseButton1Click:Connect(function() slRadiusVal=math.min(500,slRadiusVal+20);UI.slRadiusDisp.Text=tostring(slRadiusVal) end)
+UI.seaLevelBtn.MouseButton1Click:Connect(function()
+	UI.seaLevelBtn.Text="⏳ MENGISI AIR...";UI.seaLevelBtn.BackgroundColor3=Color3.fromRGB(0,60,130);task.wait(0.2)
+	task.spawn(function()
+		local ok=applySeaLevel(_TB.seaLevelY,_TB.currentMaterial,slRadiusVal)
+		if ok then UI.seaLevelBtn.Text="✅ SEA LEVEL DONE!";UI.seaLevelBtn.BackgroundColor3=Color3.fromRGB(0,155,75)
+		else UI.seaLevelBtn.Text="⚠ Gagal";UI.seaLevelBtn.BackgroundColor3=Color3.fromRGB(175,35,35) end
+		task.wait(2);UI.seaLevelBtn.Text="🌊 APPLY SEA LEVEL";UI.seaLevelBtn.BackgroundColor3=Color3.fromRGB(0,80,160)
+		updateSpecialBtns()
+	end)
+end)
+UI.flattenBtn.MouseButton1Click:Connect(function()
+	disableAllSpecialModes();_TB.flattenMode=true;_TB.placementEnabled=false;_TB.tunnelMode=false
+	_TB.brushTerrainOnly=false;_TB.swipeMode=false;_TB.swipeModeActive=false;_TB.treeBrushReady=false;_TB.treeBrushActive=false
+	updateSpecialBtns();updateQuickDisableBtn()
+end)
+local function updateFlatYDisplay() UI.flatYDisplay.Text=tostring(_TB.flattenTargetY) end
+UI.flatYMinus.MouseButton1Click:Connect(function() _TB.flattenTargetY=_TB.flattenTargetY-4;updateFlatYDisplay() end)
+UI.flatYPlus.MouseButton1Click:Connect(function() _TB.flattenTargetY=_TB.flattenTargetY+4;updateFlatYDisplay() end)
+UI.flatYSnap.MouseButton1Click:Connect(function()
+	if mouse and mouse.Hit then _TB.flattenTargetY=math.floor(mouse.Hit.Position.Y);updateFlatYDisplay();UI.flatYSnap.Text="✓";task.wait(1.5);UI.flatYSnap.Text="📍" end
+end)
+UI.smoothBtn.MouseButton1Click:Connect(function()
+	disableAllSpecialModes();_TB.smoothMode=true;_TB.placementEnabled=false;_TB.tunnelMode=false
+	_TB.brushTerrainOnly=false;_TB.swipeMode=false;_TB.swipeModeActive=false;_TB.treeBrushReady=false;_TB.treeBrushActive=false
+	updateSpecialBtns();updateQuickDisableBtn()
+end)
+UI.growBtn.MouseButton1Click:Connect(function()
+	disableAllSpecialModes();_TB.growMode=true;_TB.placementEnabled=false;_TB.tunnelMode=false
+	_TB.brushTerrainOnly=false;_TB.swipeMode=false;_TB.swipeModeActive=false;_TB.treeBrushReady=false;_TB.treeBrushActive=false
+	updateSpecialBtns();updateQuickDisableBtn()
+end)
+
+-- TAB PAINT events
+UI.paintBtn.MouseButton1Click:Connect(function()
+	disableAllSpecialModes();_TB.paintMode=true;_TB.placementEnabled=false;_TB.tunnelMode=false
+	_TB.brushTerrainOnly=false;_TB.swipeMode=false;_TB.swipeModeActive=false;_TB.treeBrushReady=false;_TB.treeBrushActive=false
+	updateSpecialBtns();updateQuickDisableBtn()
+end)
+-- Replace src/dst selector (klik = cycle)
+UI.repFromBtn.MouseButton1Click:Connect(function()
+	local idx=1;for i,m in ipairs(materials) do if m==_TB.replaceSrcMat then idx=i;break end end
+	idx=idx%#materials+1;_TB.replaceSrcMat=materials[idx]
+	UI.repFromBtn.Text=materialNames[_TB.replaceSrcMat] or _TB.replaceSrcMat
+	UI.repFromBtn.BackgroundColor3=materialColors[_TB.replaceSrcMat] or Color3.fromRGB(60,60,80)
+end)
+UI.repToBtn.MouseButton1Click:Connect(function()
+	local idx=1;for i,m in ipairs(materials) do if m==_TB.replaceDstMat then idx=i;break end end
+	idx=idx%#materials+1;_TB.replaceDstMat=materials[idx]
+	UI.repToBtn.Text=materialNames[_TB.replaceDstMat] or _TB.replaceDstMat
+	UI.repToBtn.BackgroundColor3=materialColors[_TB.replaceDstMat] or Color3.fromRGB(60,60,80)
+end)
+UI.replaceBtn.MouseButton1Click:Connect(function()
+	UI.replaceBtn.Text="⏳ REPLACING...";UI.replaceBtn.BackgroundColor3=Color3.fromRGB(180,90,0);task.wait(0.2)
+	local count=doReplaceMaterial(_TB.replaceSrcMat,_TB.replaceDstMat)
+	UI.replaceBtn.Text="✅ "..count.." titik diganti!";UI.replaceBtn.BackgroundColor3=Color3.fromRGB(40,155,60)
+	task.wait(2);UI.replaceBtn.Text="🔄 REPLACE SEKARANG";UI.replaceBtn.BackgroundColor3=Color3.fromRGB(120,60,0)
+	updateTitleCounter()
+end)
+
+-- TAB TOOL events
+UI.refreshStatsBtn.MouseButton1Click:Connect(function() refreshStats() end)
+UI.refreshFilesBtn.MouseButton1Click:Connect(function()
+	UI.refreshFilesBtn.Text="⏳...";task.wait(0.2);refreshFileList()
+	UI.refreshFilesBtn.Text="📂 Refresh File List"
+end)
+UI.manualSaveBtn.MouseButton1Click:Connect(function()
+	UI.manualSaveBtn.Text="💾 Menyimpan...";task.wait(0.2);autoSaveDraft()
+	UI.manualSaveBtn.Text="✅ Tersimpan!";task.wait(2);UI.manualSaveBtn.Text="💾 Manual Auto-Save Sekarang"
+end)
+
+-- CLEAR
+UI.clearBtn.MouseButton1Click:Connect(function()
+	if not _TB.clearConfirmPending then
+		_TB.clearConfirmPending=true;UI.clearBtn.Text="⚠ YAKIN?";UI.clearBtn.BackgroundColor3=Color3.fromRGB(195,115,18)
+		if _TB.clearConfirmTimer then task.cancel(_TB.clearConfirmTimer) end
+		_TB.clearConfirmTimer=task.delay(3,function() _TB.clearConfirmPending=false;UI.clearBtn.Text="🗑️ CLEAR";UI.clearBtn.BackgroundColor3=Color3.fromRGB(130,35,35) end)
+	else
+		if _TB.clearConfirmTimer then task.cancel(_TB.clearConfirmTimer) end;_TB.clearConfirmPending=false
+		clearProject();_TB.limitReached=false
+		_TB.brushTerrainOnly=false;UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: OFF";UI.brushTerrainOnlyBtn.BackgroundColor3=Color3.fromRGB(75,55,100)
+		_TB.swipeMode=false;_TB.swipeModeActive=false;UI.swipeModeBtn.Text="🖌️ MODE USAP: OFF";UI.swipeModeBtn.BackgroundColor3=Color3.fromRGB(55,35,85)
+		_TB.treeBrushReady=false;_TB.treeBrushActive=false;UI.treeBrushBtn.Text="🌳 BRUSH POHON: OFF";UI.treeBrushBtn.BackgroundColor3=Color3.fromRGB(35,75,45)
+		disableAllSpecialModes();updateSpecialBtns();_TB.placementEnabled=false;updateQuickDisableBtn()
+		UI.clearBtn.Text="✓ CLEARED";UI.clearBtn.BackgroundColor3=Color3.fromRGB(55,155,75)
+		task.wait(1.5);UI.clearBtn.Text="🗑️ CLEAR";UI.clearBtn.BackgroundColor3=Color3.fromRGB(130,35,35)
+	end
+end)
+
+-- SIMPAN KE DELTA
+UI.convertToScriptBtn.MouseButton1Click:Connect(function()
+	local total=getTotalTerrainCount()+(function() local n=0;for _,d in ipairs(_TB.swipeData) do if not d._undone then n=n+1 end end;return n end)()+#_TB.seaLevelData
+	if total==0 then
+		UI.convertToScriptBtn.Text="⚠ Tidak ada data";UI.convertToScriptBtn.BackgroundColor3=Color3.fromRGB(175,135,55)
+		task.wait(2);UI.convertToScriptBtn.Text="💾 SIMPAN KE DELTA";UI.convertToScriptBtn.BackgroundColor3=Color3.fromRGB(0,130,70);return
+	end
+	UI.convertToScriptBtn.Text="⏳ GENERATING...";UI.convertToScriptBtn.BackgroundColor3=Color3.fromRGB(250,188,5);task.wait(0.3)
+	local chunks=generateScriptChunks()
+	if not chunks then
+		UI.convertToScriptBtn.Text="⚠ Gagal generate";task.wait(2);UI.convertToScriptBtn.Text="💾 SIMPAN KE DELTA";UI.convertToScriptBtn.BackgroundColor3=Color3.fromRGB(0,130,70);return
+	end
+	local totalChunks=#chunks
+	UI.convertToScriptBtn.Text=totalChunks>1 and ("💾 MENYIMPAN "..totalChunks.." FILE...") or "💾 MENYIMPAN..."
+	task.wait(0.2)
+	local savedFiles=saveChunksToStorage(chunks)
+	local ok=0;local fail=0
+	for _,f in ipairs(savedFiles) do
+		if f.ok then ok=ok+1;print("[TB V13] ✅ "..f.path) else fail=fail+1;warn("[TB V13] ⚠ "..tostring(f.err)) end
+	end
+	if ok>0 then
+		UI.convertToScriptBtn.Text=totalChunks>1 and ("✅ "..ok.."/"..totalChunks.." file tersimpan!") or "✅ TERSIMPAN!"
+		UI.convertToScriptBtn.BackgroundColor3=Color3.fromRGB(38,160,65)
+		pcall(function() setclipboard(chunks[1].content) end)
+		task.wait(2);clearProject();_TB.limitReached=false
+		_TB.brushTerrainOnly=false;UI.brushTerrainOnlyBtn.Text="🏔️ TANPA PART: OFF";UI.brushTerrainOnlyBtn.BackgroundColor3=Color3.fromRGB(75,55,100)
+	else
+		UI.convertToScriptBtn.Text="⚠ writefile gagal! Script di-copy";UI.convertToScriptBtn.BackgroundColor3=Color3.fromRGB(195,95,18)
+		pcall(function() setclipboard(chunks[1].content) end);task.wait(3)
+	end
+	UI.convertToScriptBtn.Text="💾 SIMPAN KE DELTA";UI.convertToScriptBtn.BackgroundColor3=Color3.fromRGB(0,130,70)
+	refreshFileList()
+end)
+
+-- ═══════════════════════════════════════════════════════════
+-- MOUSE / INPUT
+end
+
+local function _setupInput()
+-- ═══════════════════════════════════════════════════════════
+local function getSnappedPos(hit)
+	if not hit then return nil end
+	local pos=hit.Position
+	if _TB.lockY then pos=Vector3.new(pos.X,_TB.lockedY,pos.Z) end
+	local g=_TB.currentShape=="Bola" and math.max(2,math.floor(math.min(_TB.width,_TB.height,_TB.depth)/2)) or math.min(_TB.width,_TB.height,_TB.depth)
+	g=math.max(g,1)
+	return Vector3.new(math.floor(pos.X/g+0.5)*g,math.floor(pos.Y/g+0.5)*g,math.floor(pos.Z/g+0.5)*g)
+end
+
+mouse.Button1Down:Connect(function()
+	_TB.isMouseDown=true
+	if not mouse or not mouse.Hit then return end
+	local pos=getSnappedPos(mouse.Hit); if not pos then return end
+	if _TB.treeBrushReady and _TB.treeBrushActive then brushTree(pos)
+	elseif _TB.swipeMode and _TB.swipeModeActive then _TB.lastSwipePos=nil;brushSwipe(pos)
+	elseif _TB.tunnelMode then createTunnel(pos)
+	elseif _TB.flattenMode then brushFlatten(pos)
+	elseif _TB.smoothMode then brushSmooth(pos)
+	elseif _TB.erodeMode then brushErode(pos)
+	elseif _TB.growMode then brushGrow(pos)
+	elseif _TB.paintMode then brushPaint(pos)
+	elseif _TB.brushTerrainOnly and _TB.placementEnabled then _TB.brushTrailParts={};_TB.lastBrushPos=nil;brushTerrainOnly_Pure(pos)
+	elseif _TB.placementEnabled then _TB.brushTrailParts={};_TB.lastBrushPos=nil;brushTerrainContinuous(pos)
+	end
+end)
+mouse.Button1Up:Connect(function() _TB.isMouseDown=false;_TB.lastBrushPos=nil;_TB.lastSwipePos=nil end)
+
+RunService.Heartbeat:Connect(function()
+	if not _TB.isMouseDown or not mouse or not mouse.Hit then return end
+	local pos=getSnappedPos(mouse.Hit); if not pos then return end
+	if _TB.treeBrushReady and _TB.treeBrushActive then brushTree(pos)
+	elseif _TB.swipeMode and _TB.swipeModeActive then brushSwipe(pos)
+	elseif _TB.flattenMode then brushFlatten(pos)
+	elseif _TB.smoothMode then brushSmooth(pos)
+	elseif _TB.erodeMode then brushErode(pos)
+	elseif _TB.growMode then brushGrow(pos)
+	elseif _TB.paintMode then brushPaint(pos)
+	elseif _TB.placementEnabled then
+		if _TB.brushTerrainOnly then brushTerrainOnly_Pure(pos) else brushTerrainContinuous(pos) end
+	end
+	-- [B1] Auto-save check
+	local now=tick()
+	if now-_TB.lastAutoSave>AUTOSAVE_INTERVAL then _TB.lastAutoSave=now;task.spawn(autoSaveDraft) end
+end)
+
+RunService.RenderStepped:Connect(function()
+	if mouse and mouse.Hit then updatePreview(getSnappedPos(mouse.Hit))
+	else previewPart.Transparency=1;previewBox.Adornee=nil end
+end)
+
+-- [B3] SCROLL WHEEL = resize brush
+mouse.WheelForward:Connect(function()
+	if not UIS:IsKeyDown(Enum.KeyCode.LeftControl) then return end
+	_TB.width=math.clamp(_TB.width+2,2,100);_TB.height=math.clamp(_TB.height+2,2,100);_TB.depth=math.clamp(_TB.depth+2,2,100)
+	_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth)
+	UI.widthLabel.Text=tostring(_TB.width);UI.heightLabel.Text=tostring(_TB.height);UI.depthLabel.Text=tostring(_TB.depth);updateHUD()
+end)
+mouse.WheelBackward:Connect(function()
+	if not UIS:IsKeyDown(Enum.KeyCode.LeftControl) then return end
+	_TB.width=math.clamp(_TB.width-2,2,100);_TB.height=math.clamp(_TB.height-2,2,100);_TB.depth=math.clamp(_TB.depth-2,2,100)
+	_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth)
+	UI.widthLabel.Text=tostring(_TB.width);UI.heightLabel.Text=tostring(_TB.height);UI.depthLabel.Text=tostring(_TB.depth);updateHUD()
+end)
+
+-- KEYBOARD SHORTCUTS
+UIS.InputBegan:Connect(function(input,gpe)
+	if gpe then return end
+	local k=input.KeyCode
+	if k==Enum.KeyCode.E then
+		if _TB.flattenMode or _TB.smoothMode or _TB.erodeMode or _TB.growMode or _TB.paintMode or _TB.seaLevelMode then
+			if _TB.disableAllSpecialModes then _TB.disableAllSpecialModes() end
+			if _TB.updateSpecialBtns then _TB.updateSpecialBtns() end
+			if _TB.updateQuickDisableBtn then _TB.updateQuickDisableBtn() end
+		else
+			_TB.placementEnabled=not _TB.placementEnabled
+			if _TB.placementEnabled and _TB.tunnelMode then _TB.tunnelMode=false;UI.tunnelBtn.Text="🕳️ Mode Gali: OFF";UI.tunnelBtn.BackgroundColor3=Color3.fromRGB(70,70,110) end
+			if _TB.updateQuickDisableBtn then _TB.updateQuickDisableBtn() end
+		end
+	elseif k==Enum.KeyCode.R then
+		local rAngles=UI.rotAngles or {0,45,90,135,180}
+		local rIdx=(UI.rotIndex or 1)%#rAngles+1;UI.rotIndex=rIdx;_TB.rotationAngle=rAngles[rIdx];if UI.rotDisplay then UI.rotDisplay.Text=tostring(_TB.rotationAngle).."°" end;updateHUD()
+	elseif k==Enum.KeyCode.LeftBracket then
+		_TB.width=math.clamp(_TB.width-2,2,100);_TB.height=math.clamp(_TB.height-2,2,100);_TB.depth=math.clamp(_TB.depth-2,2,100)
+		_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth);UI.widthLabel.Text=tostring(_TB.width);UI.heightLabel.Text=tostring(_TB.height);UI.depthLabel.Text=tostring(_TB.depth);updateHUD()
+	elseif k==Enum.KeyCode.RightBracket then
+		_TB.width=math.clamp(_TB.width+2,2,100);_TB.height=math.clamp(_TB.height+2,2,100);_TB.depth=math.clamp(_TB.depth+2,2,100)
+		_TB.currentBlockSize=Vector3.new(_TB.width,_TB.height,_TB.depth);UI.widthLabel.Text=tostring(_TB.width);UI.heightLabel.Text=tostring(_TB.height);UI.depthLabel.Text=tostring(_TB.depth);updateHUD()
+	elseif k==Enum.KeyCode.Z then undoBrushTerrain()
+	elseif k==Enum.KeyCode.Y then redoBrushTerrain()
+	elseif k==Enum.KeyCode.P then
+		_TB.panelVisible=not _TB.panelVisible;pluginFrame.Visible=_TB.panelVisible
+		UI.toggleLogo.BackgroundColor3=_TB.panelVisible and Color3.fromRGB(35,135,55) or Color3.fromRGB(20,20,28)
+	elseif k==Enum.KeyCode.F then
+		if _TB.flattenMode then if _TB.disableAllSpecialModes then _TB.disableAllSpecialModes() end
+		else if _TB.disableAllSpecialModes then _TB.disableAllSpecialModes() end;_TB.flattenMode=true;_TB.placementEnabled=false end
+		if _TB.updateSpecialBtns then _TB.updateSpecialBtns() end;if _TB.updateQuickDisableBtn then _TB.updateQuickDisableBtn() end
+	elseif k==Enum.KeyCode.G then
+		if _TB.growMode then if _TB.disableAllSpecialModes then _TB.disableAllSpecialModes() end
+		else if _TB.disableAllSpecialModes then _TB.disableAllSpecialModes() end;_TB.growMode=true;_TB.placementEnabled=false end
+		if _TB.updateSpecialBtns then _TB.updateSpecialBtns() end;if _TB.updateQuickDisableBtn then _TB.updateQuickDisableBtn() end
+	elseif k==Enum.KeyCode.T then
+		if _TB.smoothMode then if _TB.disableAllSpecialModes then _TB.disableAllSpecialModes() end
+		else if _TB.disableAllSpecialModes then _TB.disableAllSpecialModes() end;_TB.smoothMode=true;_TB.placementEnabled=false end
+		if _TB.updateSpecialBtns then _TB.updateSpecialBtns() end;if _TB.updateQuickDisableBtn then _TB.updateQuickDisableBtn() end
+	elseif k==Enum.KeyCode.Tab then
+		local tNames=_TB.tabNames or {"ADD","REMOVE","PAINT","TOOL"}
+		local idx=1;for i,n in ipairs(tNames) do if n==_TB.activeTab then idx=i;break end end
+		if _TB.switchTab then _TB.switchTab(tNames[idx%#tNames+1]) end
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+end
+
+_setupWidgets()
+_setupEvents()
+_setupInput()
+-- INIT
+-- ═══════════════════════════════════════════════════════════
+if _TB.updateQuickDisableBtn then _TB.updateQuickDisableBtn() end
+if _TB.updateSpecialBtns then _TB.updateSpecialBtns() end
+if _TB.updateRotDisplay then _TB.updateRotDisplay() end
+updateHUD()
+task.spawn(function() task.wait(2);if _TB.refreshFileList then _TB.refreshFileList() end;if _TB.refreshStats then _TB.refreshStats() end end)
+
+print("[TerrainBuilder V13] ✅ Loaded — FULL STUDIO FEATURES!")
+print("  Tabs: ADD / REMOVE / PAINT / TOOL  (Tab key untuk ganti)")
+print("  💾 Output: Delta/Workspace/HASIL TERRAIN/Terrain1.txt")
+print("  📏 Limit per file: 200.000 char (auto split)")
+print("  🔄 Auto-save draft tiap 5 menit ke _autosave.txt")
+print("  Ctrl+Scroll = resize brush")
+print("  Keyboard: E=enable R=rotasi [ ]=size Z=undo Y=redo P=panel")
+print("            F=flatten G=grow T=smooth Tab=ganti tab")
